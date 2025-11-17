@@ -164,8 +164,8 @@ export class TriggerEngineService implements ITriggerEngineService {
     const arr: Trigger[] = [];
     for (const t of triggers) arr.push(t);
 
-    // sort by threshold
-    arr.sort((a, b) => (b.priceChangePercent ?? 0) - (a.priceChangePercent ?? 0));
+    // sort by threshold (now OI)
+    arr.sort((a, b) => (b.oiChangePercent ?? 0) - (a.oiChangePercent ?? 0));
     result.set(key, arr);
 
     return result;
@@ -203,7 +203,7 @@ export class TriggerEngineService implements ITriggerEngineService {
       let metrics: any = null;
 
       // Dynamic invalidation: if cached exists and price moved significantly vs trigger threshold
-      const thresholdPercent = Math.abs(trigger.priceChangePercent || 0);
+      const thresholdPercent = Math.abs(trigger.oiChangePercent || 0);
       // fallback to 1% if threshold is missing or tiny
       const effectiveThreshold = Math.max(thresholdPercent, 1);
       const invalidateLevel = Math.max(effectiveThreshold / 200, 0.005); // half of threshold (%) divided by 100
@@ -233,8 +233,8 @@ export class TriggerEngineService implements ITriggerEngineService {
       }
 
       if (this.isDebug()) {
-        const pct = Number.isFinite(metrics.priceChangePercent) ? metrics.priceChangePercent.toFixed(2) : 'NaN';
-        this.logger.debug(`Eval trigger=${trigger.id} symbol=${symbol} interval=${trigger.timeIntervalMinutes}m actual=${pct}% currentPrice=${metrics.currentPrice}`);
+        const pct = Number.isFinite(metrics.oiChangePercent) ? metrics.oiChangePercent.toFixed(2) : 'NaN';
+        this.logger.debug(`Eval trigger=${trigger.id} symbol=${symbol} interval=${trigger.timeIntervalMinutes}m actual OI=${pct}% currentPrice=${metrics.currentPrice}`);
       }
 
       if (this.shouldTriggerFire(trigger, metrics)) {
@@ -270,12 +270,12 @@ export class TriggerEngineService implements ITriggerEngineService {
     }
   }
 
-  // Safer comparison with NaN handling. For "down" triggers, threshold is treated as positive percent.
-  private shouldTriggerFire(trigger: Trigger, metrics: { priceChangePercent: number }): boolean {
-    const actual = metrics?.priceChangePercent;
+  // Should fire: compare OI (primary)
+  private shouldTriggerFire(trigger: Trigger, metrics: { oiChangePercent: number; priceChangePercent?: number }): boolean {
+    const actual = metrics?.oiChangePercent;
     if (!Number.isFinite(actual)) return false;
 
-    const threshold = Number(trigger.priceChangePercent) || 0;
+    const threshold = Number(trigger.oiChangePercent) || 0;
     if (trigger.direction === 'up') return actual >= threshold;
 
     // down: actual is usually negative, threshold is positive

@@ -6,14 +6,29 @@ export interface IDataPoint {
 }
 
 export interface IMetricChanges {
-  readonly priceChangePercent: number;
-  readonly currentPrice: number;
-  readonly previousPrice: number; // NEW: for context
-  readonly timeWindowSeconds: number; // NEW: actual time window measured
+  // Primary (OI)
+  readonly oiChangePercent: number;
+  readonly oiStart?: number;
+  readonly oiEnd?: number;
+
+  // Volume metrics
+  readonly totalVolume?: number;
+  readonly deltaVolume?: number;
+
+  // Secondary (price)
+  readonly priceChangePercent?: number;
+  readonly currentPrice?: number;
+  readonly previousPrice?: number;
+
+  readonly timeWindowSeconds: number; // actual time window measured
 }
 
 export interface IDataAggregatorService {
+  // Backwards compatible: many providers still call updatePrice
   updatePrice(symbol: string, price: number, timestamp: number): void;
+
+  // Implementations may provide more advanced API (e.g., updateMarketData),
+  // but trigger engine uses getMetricChanges which must return IMetricChanges.
   getMetricChanges(symbol: string, timeIntervalMinutes: number): IMetricChanges | null;
   getAllKnownSymbols(): string[];
   getHistoryLength(symbol: string): number;

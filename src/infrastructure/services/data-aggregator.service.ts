@@ -1,12 +1,6 @@
-// Production-Ready Data Aggregator Service v2.3
-// Features:
-// - Event-time OHLC with out-of-order support
-// - Boundary interpolation (linear, production-grade)
-// - Dynamic coverage thresholds (90% for 1m, 80% for 30m+)
-// - minBuckets = 60% of minutes
-// - SortedBucketMap with O(1) sorted keys
-// - LRU + TTL eviction
-// - Health monitoring + warmup/fallback metrics
+// DataAggregatorServiceV3.ts
+// Production-ready aggregator v3 — primary signal: Open Interest (OI)
+// Backwards compatible with updatePrice(symbol, price, ts)
 
 import { Injectable } from "../../shared/decorators";
 import {
@@ -16,11 +10,39 @@ import {
 } from "../../domain/interfaces/services.interface";
 import { Logger } from "../../shared/logger";
 
+/**
+ * Extended PriceUpdate shape we expect providers to gradually adopt.
+ * Note: we do NOT change provider interface here — MarketDataGateway may
+ * still call updatePrice; but providers that support OI/volumeBuy/volumeSell
+ * should pass these into updateMarketData (see method below).
+ */
+export type MarketUpdatePayload = {
+  timestamp: number;
+  price?: number; // optional (we can operate on OI-only signals)
+  openInterest?: number; // cumulative OI at this timestamp (preferred)
+  volume?: number; // total volume in update (if only this is present)
+  volumeBuy?: number; // buyer-initiated volume
+  volumeSell?: number; // seller-initiated volume
+  markPrice?: number;
+  fundingRate?: number;
+};
+
 type Bucket = {
-  open: number;
-  close: number;
-  high: number;
-  low: number;
+  // OI-centric fields
+  oiOpen: number;
+  oiClose: number;
+  oiHigh: number;
+  oiLow: number;
+
+  // Volume fields (aggregated)
+  volumeBuy: number;
+  volumeSell: number;
+  totalVolume: number;
+
+  // Price kept for price% calculations
+  priceOpen: number | null;
+  priceClose: number | null;
+
   count: number;
   firstTs: number;
   lastTs: number;
@@ -37,7 +59,6 @@ type HealthStats = {
   fallbacksUsed: number;
 };
 
-// Wrapper for Map with cached sorted keys
 class SortedBucketMap {
   private map: Map<number, Bucket> = new Map();
   private sortedKeys: number[] | null = null;
@@ -57,16 +78,12 @@ class SortedBucketMap {
   set(key: number, value: Bucket): void {
     const isNew = !this.map.has(key);
     this.map.set(key, value);
-    if (isNew) {
-      this.sortedKeys = null;
-    }
+    if (isNew) this.sortedKeys = null;
   }
 
   delete(key: number): boolean {
     const existed = this.map.delete(key);
-    if (existed) {
-      this.sortedKeys = null;
-    }
+    if (existed) this.sortedKeys = null;
     return existed;
   }
 
@@ -96,19 +113,20 @@ class SortedBucketMap {
 
 @Injectable()
 export class DataAggregatorService implements IDataAggregatorService {
-  private readonly logger = new Logger("DataAggregatorProd");
+  private readonly logger = new Logger("DataAggregatorV3");
 
   private buckets15s: Map<string, SortedBucketMap> = new Map();
   private buckets1m: Map<string, SortedBucketMap> = new Map();
 
   private lastKnownPrices: Map<string, number> = new Map();
+  private lastKnownOI: Map<string, number> = new Map();
   private lastUpdateTs: Map<string, number> = new Map();
   private firstSeen: Map<string, number> = new Map();
   private outOfOrderCount: Map<string, number> = new Map();
 
   private triggerEngine?: ITriggerEngineService | null = null;
 
-  // Configuration
+  // Config (same defaults as your v2)
   private readonly MAX_MINUTE_BUCKETS = Number(process.env.MAX_MINUTE_BUCKETS) || 70;
   private readonly MAX_15S_BUCKETS = Number(process.env.MAX_15S_BUCKETS) || 300;
   private readonly MIN_BUCKET_SAMPLES = Number(process.env.MIN_BUCKET_SAMPLES) || 2;
@@ -128,35 +146,55 @@ export class DataAggregatorService implements IDataAggregatorService {
   private fallbacksUsed = 0;
   private warmupRejects = 0;
 
-  // ==================== PUBLIC API ====================
+  // ---------------- PUBLIC API ----------------
 
+  /**
+   * Backwards-compatible method used by existing gateway:
+   * updatePrice(symbol, price, timestamp)
+   * We'll translate it into the extended market update with only price.
+   */
   public updatePrice(symbol: string, price: number, timestamp: number): void {
-    if (!symbol || !Number.isFinite(price) || price <= 0) {
-      if (this.DEBUG) this.logger.warn(`Invalid price update: ${symbol} ${price}`);
-      return;
+    this.updateMarketData(symbol, { timestamp, price });
+  }
+
+  /**
+   * New recommended entry point for providers that can supply
+   * openInterest, volumeBuy/volumeSell, etc.
+   */
+  public updateMarketData(symbol: string, payload: MarketUpdatePayload): void {
+    if (!symbol) return;
+
+    const ts = Number.isFinite(payload.timestamp) ? Math.floor(payload.timestamp) : Date.now();
+    // Update last seen price / oi if present
+    if (Number.isFinite(payload.price) && payload.price! > 0) {
+      this.lastKnownPrices.set(symbol, payload.price!);
     }
-
-    if (!Number.isFinite(timestamp) || timestamp <= 0) {
-      if (this.DEBUG) this.logger.warn(`Invalid timestamp: ${symbol} ${timestamp}`);
-      return;
+    if (Number.isFinite(payload.openInterest) && payload.openInterest! >= 0) {
+      this.lastKnownOI.set(symbol, payload.openInterest!);
     }
-
-    const maxFuture = Date.now() + 60_000;
-    const safeTs = Math.min(Math.floor(timestamp), maxFuture);
-
-    this.lastKnownPrices.set(symbol, price);
-    this.lastUpdateTs.set(symbol, safeTs);
+    this.lastUpdateTs.set(symbol, ts);
 
     if (!this.firstSeen.has(symbol)) {
-      this.firstSeen.set(symbol, safeTs);
+      this.firstSeen.set(symbol, ts);
       if (this.DEBUG) this.logger.debug(`New symbol tracked: ${symbol}`);
     }
 
-    this.addRawPoint(symbol, { timestamp: safeTs, price });
+    // Add to both bucket stores (15s and 1m)
+    this.addRawPoint(symbol, {
+      timestamp: ts,
+      price: payload.price,
+      openInterest: payload.openInterest,
+      volume: payload.volume,
+      volumeBuy: payload.volumeBuy,
+      volumeSell: payload.volumeSell,
+    });
 
+    // trigger engine: preserve original onPriceUpdate hook for compatibility
     if (this.triggerEngine && typeof this.triggerEngine.onPriceUpdate === 'function') {
       try {
-        void this.triggerEngine.onPriceUpdate(symbol, price);
+        // call with price if available
+        const priceForCallback = payload.price ?? this.lastKnownPrices.get(symbol);
+        void this.triggerEngine.onPriceUpdate(symbol, priceForCallback ?? 0);
       } catch (err) {
         this.logger.error(`Trigger engine notification failed: ${err}`);
       }
@@ -180,6 +218,10 @@ export class DataAggregatorService implements IDataAggregatorService {
     }
   }
 
+  /**
+   * Get metric changes for window (minutes).
+   * Returns richer structure with OI metrics + volume/delta + price% (if price available).
+   */
   public getMetricChanges(symbol: string, timeIntervalMinutes: number): IMetricChanges | null {
     if (!symbol || timeIntervalMinutes <= 0) return null;
 
@@ -194,6 +236,7 @@ export class DataAggregatorService implements IDataAggregatorService {
     for (const s of this.buckets15s.keys()) set.add(s);
     for (const s of this.buckets1m.keys()) set.add(s);
     for (const s of this.lastKnownPrices.keys()) set.add(s);
+    for (const s of this.lastKnownOI.keys()) set.add(s);
     return Array.from(set);
   }
 
@@ -211,7 +254,7 @@ export class DataAggregatorService implements IDataAggregatorService {
     this.triggerEngine = engine;
   }
 
-  // ==================== MONITORING API ====================
+  // --------------- Monitoring helpers (unchanged semantics) ---------------
 
   public getBucketHealth(symbol: string, minutes: number): {
     availableBuckets: number;
@@ -256,8 +299,8 @@ export class DataAggregatorService implements IDataAggregatorService {
       keys.slice(-10).forEach(ts => {
         const b = m15.get(ts)!;
         this.logger.info(
-          `  ${new Date(ts).toISOString()} | O:${b.open.toFixed(6)} H:${b.high.toFixed(6)} ` +
-          `L:${b.low.toFixed(6)} C:${b.close.toFixed(6)} | cnt:${b.count}`
+          `  ${new Date(ts).toISOString()} | OI: O:${b.oiOpen.toFixed(6)} H:${b.oiHigh.toFixed(6)} ` +
+          `L:${b.oiLow.toFixed(6)} C:${b.oiClose.toFixed(6)} | volBuy:${b.volumeBuy.toFixed(6)} volSell:${b.volumeSell.toFixed(6)} cnt:${b.count}`
         );
       });
     }
@@ -268,8 +311,8 @@ export class DataAggregatorService implements IDataAggregatorService {
       keys.slice(-10).forEach(ts => {
         const b = m1.get(ts)!;
         this.logger.info(
-          `  ${new Date(ts).toISOString()} | O:${b.open.toFixed(6)} H:${b.high.toFixed(6)} ` +
-          `L:${b.low.toFixed(6)} C:${b.close.toFixed(6)} | cnt:${b.count}`
+          `  ${new Date(ts).toISOString()} | OI: O:${b.oiOpen.toFixed(6)} H:${b.oiHigh.toFixed(6)} ` +
+          `L:${b.oiLow.toFixed(6)} C:${b.oiClose.toFixed(6)} | volBuy:${b.volumeBuy.toFixed(6)} volSell:${b.volumeSell.toFixed(6)} cnt:${b.count}`
         );
       });
     }
@@ -302,7 +345,7 @@ export class DataAggregatorService implements IDataAggregatorService {
       }
     }
 
-    const bytesPerBucket = 80;
+    const bytesPerBucket = 120; // more fields -> larger estimate
     const memoryEstimateMB = ((buckets15Count + buckets1mCount) * bytesPerBucket) / (1024 * 1024);
 
     return {
@@ -317,18 +360,25 @@ export class DataAggregatorService implements IDataAggregatorService {
     };
   }
 
-  // ==================== INGESTION & BUCKETS ====================
+  // ---------------- Ingestion and bucket aggregation ----------------
 
-  private addRawPoint(symbol: string, point: { timestamp: number; price: number }): void {
-    const { timestamp: ts, price } = point;
-    this.updateBucket(symbol, ts, price, 15_000, this.buckets15s);
-    this.updateBucket(symbol, ts, price, 60_000, this.buckets1m);
+  private addRawPoint(symbol: string, point: {
+    timestamp: number;
+    price?: number;
+    openInterest?: number;
+    volume?: number;
+    volumeBuy?: number;
+    volumeSell?: number;
+  }): void {
+    const { timestamp: ts, price, openInterest, volume, volumeBuy, volumeSell } = point;
+    this.updateBucket(symbol, ts, { price, openInterest, volume, volumeBuy, volumeSell }, 15_000, this.buckets15s);
+    this.updateBucket(symbol, ts, { price, openInterest, volume, volumeBuy, volumeSell }, 60_000, this.buckets1m);
   }
 
   private updateBucket(
     symbol: string,
     ts: number,
-    price: number,
+    payload: { price?: number; openInterest?: number; volume?: number; volumeBuy?: number; volumeSell?: number },
     bucketSize: number,
     store: Map<string, SortedBucketMap>,
   ): void {
@@ -341,12 +391,30 @@ export class DataAggregatorService implements IDataAggregatorService {
     const bucketTime = Math.floor(ts / bucketSize) * bucketSize;
     let b = map.get(bucketTime);
 
+    const oi = Number.isFinite(payload.openInterest) ? payload.openInterest! : undefined;
+    const price = Number.isFinite(payload.price) ? payload.price! : undefined;
+    const vol = Number.isFinite(payload.volume) ? payload.volume! : undefined;
+    const volB = Number.isFinite(payload.volumeBuy) ? payload.volumeBuy! : 0;
+    const volS = Number.isFinite(payload.volumeSell) ? payload.volumeSell! : 0;
+
     if (!b) {
+      // initialize bucket with fallbacks
+      const initialOI = oi ?? (this.lastKnownOI.get(symbol) ?? NaN);
+      const initialPrice = price ?? this.lastKnownPrices.get(symbol);
+
       b = {
-        open: price,
-        close: price,
-        high: price,
-        low: price,
+        oiOpen: Number.isFinite(initialOI) ? initialOI : 0,
+        oiClose: Number.isFinite(initialOI) ? initialOI : 0,
+        oiHigh: Number.isFinite(initialOI) ? initialOI : -Infinity,
+        oiLow: Number.isFinite(initialOI) ? initialOI : Infinity,
+
+        volumeBuy: volB,
+        volumeSell: volS,
+        totalVolume: vol ?? (volB + volS),
+
+        priceOpen: initialPrice ?? null,  // ← ИСПРАВЛЕНО: добавлено ?? null
+        priceClose: initialPrice ?? null, // ← ИСПРАВЛЕНО: добавлено ?? null
+
         count: 0,
         firstTs: ts,
         lastTs: ts,
@@ -354,22 +422,51 @@ export class DataAggregatorService implements IDataAggregatorService {
       map.set(bucketTime, b);
     }
 
+    // Out-of-order check relative to bucket's firstTs
     if (ts < b.firstTs) {
       if (b.count > 0) {
-        const count = this.outOfOrderCount.get(symbol) ?? 0;
-        this.outOfOrderCount.set(symbol, count + 1);
+        const prev = this.outOfOrderCount.get(symbol) ?? 0;
+        this.outOfOrderCount.set(symbol, prev + 1);
       }
-      b.open = price;
-      b.firstTs = ts;
+      // We treat earlier sample as opening if earlier than previous firstTs
+      if (Number.isFinite(oi)) {
+        b.oiOpen = oi!;
+        b.firstTs = ts;
+      }
+      if (Number.isFinite(price)) {
+        b.priceOpen = price!;
+        b.firstTs = ts;
+      }
     }
 
-    if (ts > b.lastTs) {
-      b.close = price;
+    // Update close if this is the newest in bucket
+    if (ts >= b.lastTs) {
+      if (Number.isFinite(oi)) b.oiClose = oi!;
+      if (Number.isFinite(price)) b.priceClose = price!;
       b.lastTs = ts;
     }
 
-    b.high = Math.max(b.high, price);
-    b.low = Math.min(b.low, price);
+    // Update high/low for OI
+    if (Number.isFinite(oi)) {
+      b.oiHigh = Math.max(b.oiHigh, oi!);
+      b.oiLow = Math.min(b.oiLow, oi!);
+    }
+
+    // Update volumes
+    if (vol !== undefined) {
+      // only total volume is present: accumulate to totalVolume
+      b.totalVolume += vol;
+    }
+    // if buy/sell split provided, add them
+    if (volB) b.volumeBuy += volB;
+    if (volS) b.volumeSell += volS;
+
+    // ensure price open/close exist
+    if (Number.isFinite(price)) {
+      if (b.priceOpen === null) b.priceOpen = price!;
+      b.priceClose = price!;
+    }
+
     b.count++;
 
     this.cleanupBuckets(store, symbol, bucketSize);
@@ -398,18 +495,18 @@ export class DataAggregatorService implements IDataAggregatorService {
     }
   }
 
-  // ==================== DYNAMIC COVERAGE THRESHOLD ====================
+  // ---------------- Coverage thresholds (kept) ----------------
 
   private getCoverageThreshold(minutes: number): number {
-    if (minutes <= 1) return 90;     // 1m  → 90%
-    if (minutes <= 2) return 80;     // 2m  → 80%
-    if (minutes <= 5) return 75;     // 3–5m → 75%
-    if (minutes <= 15) return 78;    // 6–15m → 78%
-    if (minutes <= 30) return 80;    // 16–30m → 80%
-    return 82;                       // 30m+ → 82%
+    if (minutes <= 1) return 90;
+    if (minutes <= 2) return 80;
+    if (minutes <= 5) return 75;
+    if (minutes <= 15) return 78;
+    if (minutes <= 30) return 80;
+    return 82;
   }
 
-  // ==================== CALCULATION WITH STRICT POLICIES ====================
+  // ---------------- Calculation ----------------
 
   private calculateBuckets(
     symbol: string,
@@ -425,95 +522,239 @@ export class DataAggregatorService implements IDataAggregatorService {
 
     const now = Date.now();
     const durationMs = minutes * 60_000;
+    const currentPrice = this.lastKnownPrices.get(symbol);
+    const currentOI = this.lastKnownOI.get(symbol);
 
+    // Warmup: require wall-clock firstSeen >= window
     const firstSeenTs = this.firstSeen.get(symbol) ?? now;
     const hasWallClockHistory = (now - firstSeenTs) >= durationMs;
 
-    const endBucket = Math.floor(now / bucketSize) * bucketSize;
-    const startBucket = Math.floor((now - durationMs) / bucketSize) * bucketSize;
-
-    const expectedBuckets = Math.round((endBucket - startBucket) / bucketSize) + 1;
-    const keys = map.getSortedKeys();
-    const availableBuckets = keys.filter(k => k >= startBucket && k <= endBucket).length;
-    const coveragePercent = expectedBuckets > 0 ? (availableBuckets / expectedBuckets) * 100 : 0;
-
-    const coverageThreshold = this.getCoverageThreshold(minutes);
-    const minBucketsRequired = Math.ceil(minutes * 0.6);
-
     if (!hasWallClockHistory) {
-      if (this.DEBUG) {
-        this.logger.debug(`Warmup: not enough wall-clock history for ${symbol} ${minutes}m`);
-      }
-      this.warmupRejects++;
-      return null;
-    }
-    
-    if (availableBuckets < minBucketsRequired || coveragePercent < coverageThreshold) {
-      if (this.DEBUG) {
-        this.logger.debug(
-          `Coverage reject: ${symbol} ${minutes}m ` +
-          `avail=${availableBuckets}/${expectedBuckets} ` +
-          `(${coveragePercent.toFixed(1)}%) ` +
-          `min=${minBucketsRequired} thresh=${coverageThreshold}%`
-        );
-      }
+      if (this.DEBUG) this.logger.debug(`Warmup: not enough wall-clock history for ${symbol} ${minutes}m`);
       this.warmupRejects++;
       return null;
     }
 
-    const startPrice = this.getPriceAtBoundary(map, startBucket);
-    const endPrice = this.getPriceAtBoundary(map, endBucket);
+    const windowStart = now - durationMs;
+    const windowEnd = now;
 
-    if (startPrice === null || endPrice === null) {
-      if (this.DEBUG) this.logger.debug(`🔄 Missing boundaries (interpolation failed), trying fallback`);
-      return this.fallbackInterpolation(map, startBucket, endBucket, bucketSize, durationMs, minutes);
-    }
+    // Find movements within window: returns best OI up/down and aggregated volume
+    const movement = this.findOIAndVolumeWithinWindow(map, windowStart, windowEnd);
 
-    const minSamples = this.effectiveMinSamples(minutes);
-    const startBucketKey = this.findNearestBucketAtOrBefore(map, startBucket);
-    const endBucketKey = this.findNearestBucketAtOrBefore(map, endBucket);
+    // If no OI movement and we have price data, fallback to price-based change (interpolation/fallback too)
+    let oiChangePercent = 0;
+    let oiStart = movement?.oiStart ?? 0;
+    let oiEnd = movement?.oiEnd ?? 0;
+    let totalVolume = movement?.totalVolume ?? 0;
+    let deltaVolume = movement?.deltaVolume ?? 0;
 
-    const startBucketObj = startBucketKey !== null ? map.get(startBucketKey) : undefined;
-    const endBucketObj = endBucketKey !== null ? map.get(endBucketKey) : undefined;
+    let priceChangePercent = 0;
+    let priceStart = 0;
+    let priceEnd = currentPrice ?? 0;
 
-    if (startBucketObj && endBucketObj) {
-      if (startBucketObj.count < minSamples || endBucketObj.count < minSamples) {
-        if (this.DEBUG) {
-          this.logger.debug(
-            `📊 Insufficient samples: start=${startBucketObj.count} end=${endBucketObj.count} (need ${minSamples})`
-          );
+    if (movement && movement.hasOI) {
+      oiChangePercent = movement.oiChangePercent;
+      oiStart = movement.oiStart;
+      oiEnd = movement.oiEnd;
+    } else {
+      // try fallback interpolation for OI (if any historical OI exists)
+      if (map.getSortedKeys().length > 0) {
+        const fallback = this.fallbackInterpolationForOI(map, windowStart, windowEnd, bucketSize, durationMs, minutes);
+        if (fallback) {
+          oiChangePercent = fallback.oiChangePercent;
+          oiStart = fallback.oiStart;
+          oiEnd = fallback.oiEnd;
         }
-        return this.fallbackInterpolation(map, startBucket, endBucket, bucketSize, durationMs, minutes);
       }
     }
 
-    if (startPrice <= 0 || endPrice <= 0) {
-      if (this.DEBUG) this.logger.debug(`❌ Invalid interpolated prices at boundaries`);
-      return null;
+    // Price%: compute from boundary prices (interpolate if needed)
+    const startPrice = this.getPriceAtBoundary(map, windowStart);
+    const endPrice = this.getPriceAtBoundary(map, windowEnd) ?? (currentPrice ?? undefined);
+
+    if (startPrice !== null && endPrice !== undefined && startPrice > 0) {
+      priceStart = startPrice;
+      priceEnd = endPrice!;
+      priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+    } else if (currentPrice && movement && movement.priceFallbackStart !== undefined) {
+      // best-effort using movement price info
+      priceStart = movement.priceFallbackStart ?? currentPrice;
+      priceEnd = currentPrice;
+      if (priceStart > 0) {
+        priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+      }
     }
 
-    const priceChangePercent = Number((((endPrice - startPrice) / startPrice) * 100).toFixed(6));
+    // Compose result
+    const result: any = {
+      // OI metrics (primary)
+      oiChangePercent: Number(oiChangePercent.toFixed(6)),
+      oiStart,
+      oiEnd,
 
-    const result: IMetricChanges = {
-      priceChangePercent,
-      currentPrice: endPrice,
-      previousPrice: startPrice,
-      timeWindowSeconds: minutes * 60,
+      // Volume metrics
+      totalVolume,
+      deltaVolume, // buy - sell when available; 0 otherwise
+
+      // Price metrics (secondary)
+      priceChangePercent: Number(priceChangePercent),
+
+      timeWindowSeconds: Math.max(1, Math.floor(durationMs / 1000)),
     };
 
-    if (this.DEBUG) {
-      this.logger.info(
-        `✅ ${symbol} ${minutes}m: ${priceChangePercent.toFixed(4)}% ` +
-        `(${startPrice.toFixed(6)} → ${endPrice.toFixed(6)}) ` +
-        `coverage=${coveragePercent.toFixed(1)}%`
-      );
-    }
-
     this.metricsCalculated++;
-    return result;
+    return result as IMetricChanges;
   }
 
-  // ==================== BOUNDARY INTERPOLATION HELPERS ====================
+  // Find OI movements and aggregate volume within window (single pass)
+  private findOIAndVolumeWithinWindow(
+    map: SortedBucketMap,
+    windowStart: number,
+    windowEnd: number,
+  ) {
+    const keys = map.getSortedKeys();
+    if (keys.length === 0) return null;
+
+    let seenAny = false;
+    let oiMin = Infinity;
+    let oiMinTs = 0;
+    let oiMax = -Infinity;
+    let oiMaxTs = 0;
+
+    let bestRise = 0;
+    let bestRiseStart = 0;
+    let bestRiseEnd = 0;
+    let bestRiseStartTs = 0;
+    let bestRiseEndTs = 0;
+
+    let bestDrop = 0;
+    let bestDropStart = 0;
+    let bestDropEnd = 0;
+    let bestDropStartTs = 0;
+    let bestDropEndTs = 0;
+
+    let totalVolume = 0;
+    let totalBuy = 0;
+    let totalSell = 0;
+
+    let priceFallbackStart: number | undefined;
+
+    for (let i = 0; i < keys.length; i++) {
+      const bucketTime = keys[i];
+
+      if (bucketTime < windowStart) continue;
+      if (bucketTime > windowEnd) break;
+
+      const b = map.get(bucketTime)!;
+      if (b.count === 0) continue;
+
+      seenAny = true;
+
+      // aggregate volume fields
+      totalVolume += (b.totalVolume ?? 0);
+      totalBuy += (b.volumeBuy ?? 0);
+      totalSell += (b.volumeSell ?? 0);
+
+      // OI extremes detection (if OI data is present inside bucket)
+      if (Number.isFinite(b.oiLow) && !isNaN(b.oiLow)) {
+        if (b.oiLow < oiMin) {
+          oiMin = b.oiLow;
+          oiMinTs = b.firstTs;
+        }
+      }
+      if (Number.isFinite(b.oiHigh) && !isNaN(b.oiHigh)) {
+        if (b.oiHigh > oiMax) {
+          oiMax = b.oiHigh;
+          oiMaxTs = b.firstTs;
+        }
+      }
+
+      // compute candidate rise: from minimum OI seen so far -> bucket's oiHigh
+      if (oiMin < Infinity && Number.isFinite(b.oiHigh)) {
+        const rise = ((b.oiHigh - oiMin) / oiMin) * 100;
+        if (rise > bestRise) {
+          bestRise = rise;
+          bestRiseStart = oiMin;
+          bestRiseEnd = b.oiHigh;
+          bestRiseStartTs = oiMinTs;
+          bestRiseEndTs = b.lastTs;
+        }
+      }
+
+      // compute candidate drop: from max OI seen so far -> bucket's oiLow
+      if (oiMax > -Infinity && Number.isFinite(b.oiLow)) {
+        const drop = ((oiMax - b.oiLow) / oiMax) * 100;
+        if (drop > bestDrop) {
+          bestDrop = drop;
+          bestDropStart = oiMax;
+          bestDropEnd = b.oiLow;
+          bestDropStartTs = oiMaxTs;
+          bestDropEndTs = b.lastTs;
+        }
+      }
+
+      // price fallback start: earliest bucket priceOpen in window
+      if (priceFallbackStart === undefined && b.priceOpen !== null) {
+        priceFallbackStart = b.priceOpen!;
+      }
+    }
+
+    if (!seenAny) return null;
+
+    const up = bestRise > 0 ? {
+      percent: Number(bestRise.toFixed(6)),
+      startPrice: bestRiseStart,
+      endPrice: bestRiseEnd,
+      duration: Math.max(1, Math.floor((bestRiseEndTs - bestRiseStartTs) / 1000)),
+      startTs: bestRiseStartTs,
+      endTs: bestRiseEndTs,
+    } : null;
+
+    const down = bestDrop > 0 ? {
+      percent: Number(bestDrop.toFixed(6)),
+      startPrice: bestDropStart,
+      endPrice: bestDropEnd,
+      duration: Math.max(1, Math.floor((bestDropEndTs - bestDropStartTs) / 1000)),
+      startTs: bestDropStartTs,
+      endTs: bestDropEndTs,
+    } : null;
+
+    // choose the dominant OI movement by absolute percent (same semantics as v2)
+    let chosenPercent = 0;
+    let chosenStart = 0;
+    let chosenEnd = 0;
+    if (up && down) {
+      if (up.percent >= down.percent) {
+        chosenPercent = up.percent;
+        chosenStart = up.startPrice;
+        chosenEnd = up.endPrice;
+      } else {
+        chosenPercent = -down.percent; // negative indicates drop
+        chosenStart = down.startPrice;
+        chosenEnd = down.endPrice;
+      }
+    } else if (up) {
+      chosenPercent = up.percent;
+      chosenStart = up.startPrice;
+      chosenEnd = up.endPrice;
+    } else if (down) {
+      chosenPercent = -down.percent;
+      chosenStart = down.startPrice;
+      chosenEnd = down.endPrice;
+    }
+
+    return {
+      hasOI: (oiMin !== Infinity && oiMax !== -Infinity),
+      oiChangePercent: chosenPercent,
+      oiStart: chosenStart,
+      oiEnd: chosenEnd,
+      totalVolume,
+      deltaVolume: (totalBuy && totalSell) ? (totalBuy - totalSell) : 0,
+      priceFallbackStart,
+    };
+  }
+
+  // ---------------- Boundary interpolation helpers (kept, adapted) ----------------
 
   private getPriceAtBoundary(map: SortedBucketMap, boundary: number): number | null {
     const keys = map.getSortedKeys();
@@ -537,29 +778,33 @@ export class DataAggregatorService implements IDataAggregatorService {
 
     if (leftKey !== null && leftKey === rightKey) {
       const b = map.get(leftKey)!;
-      if (b.firstTs <= boundary && boundary <= b.lastTs) {
-        return this.interpolate(b.firstTs, b.open, b.lastTs, b.close, boundary);
+      if (b.firstTs <= boundary && boundary <= b.lastTs && b.priceOpen !== null && b.priceClose !== null) {
+        return this.interpolate(b.firstTs, b.priceOpen!, b.lastTs, b.priceClose!, boundary);
       }
-      if (boundary < b.firstTs) return b.open;
-      return b.close;
+      if (boundary < b.firstTs) return b.priceOpen;
+      return b.priceClose;
     }
 
     const leftBucket = leftKey !== null ? map.get(leftKey) : undefined;
     const rightBucket = rightKey !== null ? map.get(rightKey) : undefined;
 
-    if (leftBucket && leftBucket.firstTs <= boundary && boundary <= leftBucket.lastTs) {
-      return this.interpolate(leftBucket.firstTs, leftBucket.open, leftBucket.lastTs, leftBucket.close, boundary);
+    if (leftBucket && leftBucket.firstTs <= boundary && boundary <= leftBucket.lastTs && leftBucket.priceOpen !== null && leftBucket.priceClose !== null) {
+      return this.interpolate(leftBucket.firstTs, leftBucket.priceOpen!, leftBucket.lastTs, leftBucket.priceClose!, boundary);
     }
 
-    if (rightBucket && rightBucket.firstTs <= boundary && boundary <= rightBucket.lastTs) {
-      return this.interpolate(rightBucket.firstTs, rightBucket.open, rightBucket.lastTs, rightBucket.close, boundary);
+    if (rightBucket && rightBucket.firstTs <= boundary && boundary <= rightBucket.lastTs && rightBucket.priceOpen !== null && rightBucket.priceClose !== null) {
+      return this.interpolate(rightBucket.firstTs, rightBucket.priceOpen!, rightBucket.lastTs, rightBucket.priceClose!, boundary);
     }
 
     if (leftBucket && rightBucket) {
       const prevTime = leftBucket.lastTs;
-      const prevPrice = leftBucket.close;
+      const prevPrice = leftBucket.priceClose ?? leftBucket.priceOpen ?? null;
       const nextTime = rightBucket.firstTs;
-      const nextPrice = rightBucket.open;
+      const nextPrice = rightBucket.priceOpen ?? rightBucket.priceClose ?? null;
+
+      if (prevPrice === null || nextPrice === null) {
+        return prevPrice ?? nextPrice;
+      }
 
       if (prevTime <= boundary && boundary <= nextTime && nextTime > prevTime) {
         return this.interpolate(prevTime, prevPrice, nextTime, nextPrice, boundary);
@@ -570,8 +815,8 @@ export class DataAggregatorService implements IDataAggregatorService {
       return leftDelta <= rightDelta ? prevPrice : nextPrice;
     }
 
-    if (leftBucket) return leftBucket.close;
-    if (rightBucket) return rightBucket.open;
+    if (leftBucket) return leftBucket.priceClose ?? leftBucket.priceOpen ?? null;
+    if (rightBucket) return rightBucket.priceOpen ?? rightBucket.priceClose ?? null;
 
     return null;
   }
@@ -610,14 +855,14 @@ export class DataAggregatorService implements IDataAggregatorService {
     return this.MIN_BUCKET_SAMPLES;
   }
 
-  private fallbackInterpolation(
+  private fallbackInterpolationForOI(
     map: SortedBucketMap,
     startBucket: number,
     endBucket: number,
     bucketSize: number,
     durationMs: number,
     minutes: number,
-  ): IMetricChanges | null {
+  ) {
     this.fallbacksUsed++;
     const keys = map.getSortedKeys();
     if (keys.length === 0) return null;
@@ -635,7 +880,6 @@ export class DataAggregatorService implements IDataAggregatorService {
       startKey = beforeStart[beforeStart.length - 1];
       const shiftBack = startBucket - startKey;
       if (shiftBack > maxShift) {
-        if (this.DEBUG) this.logger.debug(`❌ Backward start shift too large: ${shiftBack}ms > ${maxShift}ms`);
         startKey = null;
       }
     }
@@ -645,9 +889,7 @@ export class DataAggregatorService implements IDataAggregatorService {
       const shift = candidate - startBucket;
       if (shift <= maxShift) {
         startKey = candidate;
-        if (this.DEBUG) this.logger.debug(`⚠️ Forward shift: ${shift}ms`);
       } else {
-        if (this.DEBUG) this.logger.debug(`❌ Forward shift too large: ${shift}ms > ${maxShift}ms`);
         return null;
       }
     }
@@ -659,7 +901,6 @@ export class DataAggregatorService implements IDataAggregatorService {
       endKey = beforeEnd[beforeEnd.length - 1];
       const shiftBack = endBucket - endKey;
       if (shiftBack > maxShift) {
-        if (this.DEBUG) this.logger.debug(`❌ Backward end shift too large: ${shiftBack}ms > ${maxShift}ms`);
         endKey = null;
       }
     }
@@ -669,9 +910,7 @@ export class DataAggregatorService implements IDataAggregatorService {
       const shift = endBucket - candidate;
       if (shift <= maxShift) {
         endKey = candidate;
-        if (this.DEBUG) this.logger.debug(`⚠️ Backward shift: ${shift}ms`);
       } else {
-        if (this.DEBUG) this.logger.debug(`❌ Backward shift too large: ${shift}ms > ${maxShift}ms`);
         return null;
       }
     }
@@ -683,31 +922,86 @@ export class DataAggregatorService implements IDataAggregatorService {
     const s = map.get(startKey)!;
     const e = map.get(endKey)!;
 
-    const startPrice = this.getPriceAtBoundary(map, startBucket) ?? s.open;
-    const endPrice = this.getPriceAtBoundary(map, endBucket) ?? e.close;
+    const startOI = (this.getOIAtBoundary(map, startBucket) ?? s.oiOpen);
+    const endOI = (this.getOIAtBoundary(map, endBucket) ?? e.oiClose);
 
-    if (s.count < 1 || e.count < 1 || startPrice <= 0 || endPrice <= 0) {
+    if (!Number.isFinite(startOI) || !Number.isFinite(endOI) || startOI <= 0) {
       return null;
     }
 
-    const priceChangePercent = Number((((endPrice - startPrice) / startPrice) * 100).toFixed(6));
-
-    if (this.DEBUG) {
-      this.logger.warn(
-        `🔄 Fallback used: ${priceChangePercent.toFixed(4)}% ` +
-        `(${new Date(startKey).toISOString()} → ${new Date(endKey).toISOString()})`
-      );
-    }
+    const oiChangePercent = Number((((endOI - startOI) / startOI) * 100).toFixed(6));
 
     return {
-      priceChangePercent,
-      currentPrice: endPrice,
-      previousPrice: startPrice,
-      timeWindowSeconds: minutes * 60,
+      oiChangePercent,
+      oiStart: startOI,
+      oiEnd: endOI,
     };
   }
 
-  // ==================== LRU EVICTION ====================
+  private getOIAtBoundary(map: SortedBucketMap, boundary: number): number | null {
+    // Reuse same binary search logic as price but for OI fields
+    const keys = map.getSortedKeys();
+    if (keys.length === 0) return null;
+
+    let left = 0;
+    let right = keys.length - 1;
+    let idx = -1;
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      if (keys[mid] <= boundary) {
+        idx = mid;
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+
+    const leftKey = idx >= 0 ? keys[idx] : null;
+    const rightKey = (idx + 1) < keys.length ? keys[idx + 1] : null;
+
+    if (leftKey !== null && leftKey === rightKey) {
+      const b = map.get(leftKey)!;
+      if (b.firstTs <= boundary && boundary <= b.lastTs) {
+        // interpolate between open/close OI by time
+        return this.interpolate(b.firstTs, b.oiOpen, b.lastTs, b.oiClose, boundary);
+      }
+      if (boundary < b.firstTs) return b.oiOpen;
+      return b.oiClose;
+    }
+
+    const leftBucket = leftKey !== null ? map.get(leftKey) : undefined;
+    const rightBucket = rightKey !== null ? map.get(rightKey) : undefined;
+
+    if (leftBucket && leftBucket.firstTs <= boundary && boundary <= leftBucket.lastTs) {
+      return this.interpolate(leftBucket.firstTs, leftBucket.oiOpen, leftBucket.lastTs, leftBucket.oiClose, boundary);
+    }
+
+    if (rightBucket && rightBucket.firstTs <= boundary && boundary <= rightBucket.lastTs) {
+      return this.interpolate(rightBucket.firstTs, rightBucket.oiOpen, rightBucket.lastTs, rightBucket.oiClose, boundary);
+    }
+
+    if (leftBucket && rightBucket) {
+      const prevTime = leftBucket.lastTs;
+      const prevOI = leftBucket.oiClose;
+      const nextTime = rightBucket.firstTs;
+      const nextOI = rightBucket.oiOpen;
+
+      if (prevTime <= boundary && boundary <= nextTime && nextTime > prevTime) {
+        return this.interpolate(prevTime, prevOI, nextTime, nextOI, boundary);
+      }
+
+      const leftDelta = Math.abs(boundary - prevTime);
+      const rightDelta = Math.abs(nextTime - boundary);
+      return leftDelta <= rightDelta ? prevOI : nextOI;
+    }
+
+    if (leftBucket) return leftBucket.oiClose;
+    if (rightBucket) return rightBucket.oiOpen;
+
+    return null;
+  }
+
+  // ---------------- LRU / symbol eviction (same semantics) ----------------
 
   private ensureSymbolLimit(): void {
     const now = Date.now();
@@ -745,12 +1039,13 @@ export class DataAggregatorService implements IDataAggregatorService {
     this.buckets15s.delete(symbol);
     this.buckets1m.delete(symbol);
     this.lastKnownPrices.delete(symbol);
+    this.lastKnownOI.delete(symbol);
     this.lastUpdateTs.delete(symbol);
     this.firstSeen.delete(symbol);
     this.outOfOrderCount.delete(symbol);
   }
 
-  // ==================== MONITORING ====================
+  // ---------------- Monitoring ----------------
 
   private logHealth(): void {
     const stats = this.getHealthStats();

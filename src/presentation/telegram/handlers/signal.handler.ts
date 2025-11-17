@@ -35,12 +35,16 @@ export class SignalHandler {
       signal.signalNumber = signalCount + 1;
       signal.triggerId = triggerId;
       signal.symbol = signalDto.symbol;
-      signal.priceChangePercent = signalDto.priceChangePercent;
-      signal.currentPrice = signalDto.currentPrice;
+      // store both OI (primary) and price (secondary)
+      // @ts-ignore
+      signal.oiChangePercent = signalDto.oiChangePercent ?? 0;
+      // @ts-ignore
+      signal.priceChangePercent = signalDto.priceChangePercent ?? null;
+      signal.currentPrice = signalDto.currentPrice ?? null;
 
       await this.signalRepository.save(signal);
 
-      // ✅ UPDATED: Removed quality parameter from signalDto
+      // send telegram message
       await this.telegramBotService.sendSignal(
         userId,
         {

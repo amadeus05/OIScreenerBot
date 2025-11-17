@@ -65,29 +65,57 @@ export class TelegramBotService {
   }
 
   private formatSignalMessage(signal: SignalDto, triggerIntervalMinutes?: number): string {
-    const formatPercent = (value: number): string => {
-      const sign = value >= 0 ? '📈' : '📉';
-      return `${sign} ${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    const formatPercentWithEmoji = (value: number | undefined): string => {
+      if (value === undefined || value === null || !Number.isFinite(value)) return '—';
+      const rounded = value >= 0 ? `+${value.toFixed(2)}%` : `${value.toFixed(2)}%`;
+      const emoji = value > 0 ? '🟢' : value < 0 ? '🔴' : '⚪';
+      return `${emoji}${rounded}`;
     };
 
-    const timeStr = signal.timestamp.toLocaleTimeString('ru-RU', {
+    const formatDelta = (oi: number | undefined, price: number | undefined): string => {
+      if (!Number.isFinite(oi as number)) return '—';
+      const p = Number.isFinite(price as number) ? price as number : 0;
+      const delta = oi! - p; //TODO
+      const sign = delta >= 0 ? '+' : '';
+      const emoji = delta > 0 ? '🔺' : delta < 0 ? '🔻' : '⚪';
+      return `${emoji}${sign}${delta.toFixed(2)}%`;
+    };
+
+    const formatVolume = (v?: number): string => {
+      if (!v || !Number.isFinite(v)) return '—';
+      // nice human readable: K/M
+      if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+      if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
+      return v.toString();
+    };
+
+    const timeStr = (signal.timestamp ?? new Date()).toLocaleTimeString('ru-RU', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
     });
 
-    const priceStr = this.formatPrice(signal.currentPrice);
-    const prevPriceStr = this.formatPrice(signal.previousPrice);
     const intervalDisplay = triggerIntervalMinutes ? `${triggerIntervalMinutes}m` : '';
 
-    // Generate links based on market type
     const binanceLink = this.generateBinanceLink(signal.symbol);
     const tradingViewLink = this.generateTradingViewLink(signal.symbol);
 
+    const oiText = formatPercentWithEmoji(signal.oiChangePercent);
+    const priceText = formatPercentWithEmoji(signal.priceChangePercent ?? undefined);
+    const deltaText = formatDelta(signal.oiChangePercent, signal.priceChangePercent);
+
+    const totalVolText = formatVolume(signal.totalVolume);
+    const deltaVolText = signal.deltaVolume ? formatVolume(signal.deltaVolume) : '—';
+
+    // Price display
+    const priceStr = this.formatPrice(signal.currentPrice ?? 0);
+
     return `
 🚨 №${signal.signalNumber} - <a href="${binanceLink}">${signal.symbol}</a> ${intervalDisplay}
-${formatPercent(signal.priceChangePercent)} <a href="${tradingViewLink}">Chart</a>
-💵 ${prevPriceStr} → ${priceStr} • ⏰ ${timeStr}
+OI: ${oiText} | Price: ${priceText} | Δ: ${deltaText}
+📊 Vol: ${totalVolText} | ΔVol: ${deltaVolText}
+💵 ${priceStr} • ⏰ ${timeStr}
+<a href="${tradingViewLink}">Chart</a>
     `.trim();
   }
 
@@ -95,6 +123,7 @@ ${formatPercent(signal.priceChangePercent)} <a href="${tradingViewLink}">Chart</
    * Smart price formatting based on value magnitude
    */
   private formatPrice(price: number): string {
+    if (!Number.isFinite(price)) return '—';
     if (price >= 1000) {
       return price.toFixed(2);
     } else if (price >= 1) {

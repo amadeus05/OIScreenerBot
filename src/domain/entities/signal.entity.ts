@@ -16,11 +16,16 @@ export class Signal {
   @Column({ type: 'varchar' })
   symbol!: string;
 
-  @Column({ name: 'price_change_percent', type: 'decimal', precision: 10, scale: 4 })
-  priceChangePercent!: number;
+  // Primary metric: OI
+  @Column({ name: 'oi_change_percent', type: 'decimal', precision: 10, scale: 6, default: 0 })
+  oiChangePercent!: number;
 
-  @Column({ type: 'decimal', precision: 15, scale: 8 })
-  currentPrice!: number;
+  // Secondary: Price change kept for context
+  @Column({ name: 'price_change_percent', type: 'decimal', precision: 10, scale: 6, nullable: true })
+  priceChangePercent!: number | null;
+
+  @Column({ type: 'decimal', precision: 15, scale: 8, nullable: true })
+  currentPrice!: number | null;
 
   @CreateDateColumn()
   @Index()

@@ -7,11 +7,11 @@ export class CreateTriggerDto {
   @IsIn(['up', 'down'])
   direction!: Direction;
 
-  @IsNumber({}, { message: 'Процент изменения цены должен быть числом' })
-  @IsPositive({ message: 'Процент изменения цены должен быть положительным' })
+  @IsNumber({}, { message: 'Процент изменения OI должен быть числом' })
+  @IsPositive({ message: 'Процент изменения OI должен быть положительным' })
   @Min(0.1)
   @Max(100)
-  priceChangePercent!: number; // Changed from oiChangePercent
+  oiChangePercent!: number; // primary field (was priceChangePercent)
 
   @IsInt({ message: 'Интервал должен быть целым числом' })
   @IsPositive({ message: 'Интервал должен быть положительным' })

@@ -23,8 +23,6 @@ export class CommandHandler {
     private readonly getTriggersUseCase: GetTriggersUseCase,
     private readonly removeTriggerUseCase: RemoveTriggerUseCase,
     private readonly uptimeService: UptimeService,
-    // ❌ REMOVE: Circular dependency - not used anyway
-    // private readonly pumpScoutBot: PumpScoutBot,
   ) {
     this.bot = this.telegramBotService.getBot();
   }
@@ -64,16 +62,16 @@ export class CommandHandler {
     const uptime = this.uptimeService.getUptime();
 
     const welcomeMessage = `
-👋 <b>Добро пожаловать в Price Alert Bot!</b>
+👋 <b>Добро пожаловать в OI Alert Bot!</b>
 
-Я отслеживаю изменения цен в реальном времени по всем USDT парам.
+Я отслеживаю изменения Open Interest (OI) в реальном времени по всем USDT парам.
 
 <b>Как создать триггер:</b>
-<code>/add [up/down] [цена %] [интервал мин] [кулдаун сек]</code>
+<code>/add [up/down] [OI %] [интервал мин] [кулдаун сек]</code>
 
 <b>Пример:</b>
 <code>/add up 5 15 60</code>
-(Уведомить, если цена вырастет на 5% за 15 минут. Кулдаун 60 секунд)
+(Уведомить, если OI вырастет на 5% за 15 минут. Кулдаун 60 секунд)
 
 <b>Команды:</b>
 /add - Создать триггер
@@ -102,12 +100,12 @@ export class CommandHandler {
     }
 
     // Fix variable names
-    const [, direction, pricePercent, interval, limit] = parts;
+    const [, direction, oiPercent, interval, limit] = parts;
     const dto = new CreateTriggerDto();
     dto.userId = userId;
     dto.direction = direction as Direction;
-    // Fix: Use correct field name
-    dto.priceChangePercent = parseFloat(pricePercent);
+    // Use OI field
+    dto.oiChangePercent = parseFloat(oiPercent);
     dto.timeIntervalMinutes = parseInt(interval, 10);
     dto.notificationLimitSeconds = parseInt(limit, 10);
 
@@ -124,12 +122,12 @@ export class CommandHandler {
       await this.createTriggerUseCase.execute(dto);
       await this.telegramBotService.sendMessage(
         chatId,
-        '✅ Триггер на изменение цены успешно создан!',
+        '✅ Триггер на изменение OI успешно создан!',
       );
 
       // ADD: Debug log for successful trigger creation
       this.logger.debug(
-        `➕ User ${userId} created trigger: ${direction} ${pricePercent}% over ${interval}m`,
+        `➕ User ${userId} created trigger: ${direction} ${oiPercent}% over ${interval}m`,
       );
     } catch (error) {
       this.logger.error('Failed to create trigger:', error);
@@ -171,7 +169,7 @@ export class CommandHandler {
 
   private formatTrigger(trigger: Trigger): string {
     const directionEmoji = trigger.direction === 'up' ? '📈' : '📉';
-    return `${directionEmoji} #${trigger.id}: Цена на <b>${trigger.priceChangePercent}%</b> за <b>${trigger.timeIntervalMinutes} мин.</b>`;
+    return `${directionEmoji} #${trigger.id}: OI на <b>${trigger.oiChangePercent}%</b> за <b>${trigger.timeIntervalMinutes} мин.</b>`;
   }
 
   private async handleCallbackQuery(query: TelegramBot.CallbackQuery): Promise<void> {

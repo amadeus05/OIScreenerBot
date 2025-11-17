@@ -48,24 +48,30 @@ export class NotificationService implements INotificationService {
     // ✅ FIX: Increment consecutive fire counter
     this.consecutiveFires.set(cooldownKey, consecutiveCount + 1);
 
+    // Log primary metric (OI)
     this.logger.info(
-      `Trigger #${trigger.id} fired for ${symbol}. Price change: ${metrics.priceChangePercent.toFixed(2)}% ` +
+      `Trigger #${trigger.id} fired for ${symbol}. OI change: ${metrics.oiChangePercent.toFixed(2)}% ` +
       `(consecutive: ${consecutiveCount + 1}, cooldown: ${dynamicCooldown / 1000}s)`,
     );
 
     this.notificationCooldowns.set(cooldownKey, now);
 
     this.logger.debug(
-      `📤 Sending signal to user ${trigger.userId}: ${symbol} ${metrics.priceChangePercent.toFixed(2)}%`,
+      `📤 Preparing signal for user ${trigger.userId}: ${symbol} OI:${metrics.oiChangePercent.toFixed(2)}%`,
     );
 
-    // ✅ REMOVED: Quality indicator removed
+    // Build SignalDto (OI primary, price secondary)
     const signalDto = new SignalDto(
       0,
       symbol,
-      metrics.priceChangePercent,
-      metrics.currentPrice,
-      metrics.previousPrice,
+      metrics.oiChangePercent,
+      metrics.oiStart,
+      metrics.oiEnd,
+      metrics.totalVolume,
+      metrics.deltaVolume,
+      metrics.priceChangePercent ?? 0,
+      metrics.currentPrice ?? 0,
+      metrics.previousPrice ?? 0,
       new Date(),
       trigger.timeIntervalMinutes,
     );

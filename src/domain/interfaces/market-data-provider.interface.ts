@@ -57,18 +57,28 @@ export interface IMarketDataProvider {
   
   export type MarketType = 'spot' | 'futures';
   
-  export type PriceUpdateCallback = (data: PriceUpdateData) => void;
+  export type PriceUpdateCallback = (data: MarketUpdate) => void;
   
-  export interface PriceUpdateData {
+  export interface MarketUpdate {
     providerId: string;
     marketType: MarketType;
     symbol: string;
-    price: number;
+    price?: number;                    // теперь опционально (можем слать только дельту)
     timestamp: number;
-    volume?: number;
+    volume?: number;                   // 24h cumulative
     quoteVolume?: number;
-    markPrice?: number; // Only for futures
-    fundingRate?: number; // Only for futures
+    markPrice?: number;
+    fundingRate?: number;
+
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←← ОТКРЫТЫЙ ИНТЕРЕС
+    openInterest?: number;
+    openInterestTimestamp?: number;
+
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←← АГРЕССИВНЫЙ ОБЪЁМ (ДЕЛЬТА) — ПРАВИЛЬНЫЕ ИМЕНА ДЛЯ ТРИГГЕРОВ
+    volumeBuy?: number;              // агрессивные покупки за интервал (base asset)
+    volumeSell?: number;             // агрессивные продажи за интервал (base asset)
+    volumeBuyQuote?: number;         // в USDT
+    volumeSellQuote?: number;        // в USDT
   }
   
   export interface ProviderHealthStatus {

@@ -6,7 +6,7 @@ import {
 } from '../../domain/interfaces/services.interface';
 import {
   IMarketDataProvider,
-  PriceUpdateData,
+  MarketUpdate,
 } from '../../domain/interfaces/market-data-provider.interface';
 
 /**
@@ -36,8 +36,8 @@ export class MarketDataGatewayService implements IMarketDataGateway {
     this.providers.push(provider);
     
     // Set up price update callback
-    provider.onPriceUpdate((data: PriceUpdateData) => {
-      this.handlePriceUpdate(data);
+    provider.onPriceUpdate((data: MarketUpdate) => {
+      this.handleMarketUpdate(data);
     });
 
     this.logger.info(`Registered provider: ${provider.providerId}`);
@@ -117,10 +117,9 @@ export class MarketDataGatewayService implements IMarketDataGateway {
     return health;
   }
 
-  private handlePriceUpdate(data: PriceUpdateData): void {
+  private handleMarketUpdate(data: MarketUpdate): void {
     try {
-      // Forward to data aggregator
-      this.dataAggregator.updatePrice(data.symbol, data.price, data.timestamp);
+       this.dataAggregator.updateMarketData(data.symbol, data);
     } catch (error) {
       this.logger.error(
         `Error processing price update from ${data.providerId}:`,

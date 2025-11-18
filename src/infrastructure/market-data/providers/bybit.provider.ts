@@ -5,7 +5,7 @@ import {
   IMarketDataProvider,
   MarketType,
   PriceUpdateCallback,
-  PriceUpdateData,
+  MarketUpdate,
   ProviderHealthStatus,
 } from '../../../domain/interfaces/market-data-provider.interface';
 
@@ -183,7 +183,7 @@ export class BybitMarketDataProvider implements IMarketDataProvider {
         this.messageCount++;
         this.lastUpdateTime = Date.now();
 
-        const updateData: PriceUpdateData = {
+        const updateData: MarketUpdate = {
           providerId: this.providerId,
           marketType: this.marketType,
           symbol,

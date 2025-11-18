@@ -1,3 +1,4 @@
+import { MarketUpdatePayload } from '@infrastructure/services/data-aggregator.service';
 import { Trigger } from '../entities/trigger.entity';
 
 export interface IDataPoint {
@@ -24,11 +25,7 @@ export interface IMetricChanges {
 }
 
 export interface IDataAggregatorService {
-  // Backwards compatible: many providers still call updatePrice
-  updatePrice(symbol: string, price: number, timestamp: number): void;
-
-  // Implementations may provide more advanced API (e.g., updateMarketData),
-  // but trigger engine uses getMetricChanges which must return IMetricChanges.
+  updateMarketData(symbol: string, payload: MarketUpdatePayload): void;
   getMetricChanges(symbol: string, timeIntervalMinutes: number): IMetricChanges | null;
   getAllKnownSymbols(): string[];
   getHistoryLength(symbol: string): number;

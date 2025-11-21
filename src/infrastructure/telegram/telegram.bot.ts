@@ -65,28 +65,20 @@ export class TelegramBotService {
   }
 
   private formatSignalMessage(signal: SignalDto, triggerIntervalMinutes?: number): string {
-    const formatPercentWithEmoji = (value: number | undefined): string => {
-      if (value === undefined || value === null || !Number.isFinite(value)) return '—';
-      const rounded = value >= 0 ? `+${value.toFixed(2)}%` : `${value.toFixed(2)}%`;
-      const emoji = value > 0 ? '🟢' : value < 0 ? '🔴' : '⚪';
-      return `${emoji}${rounded}`;
-    };
-
-    const formatDelta = (oi: number | undefined, price: number | undefined): string => {
-      if (!Number.isFinite(oi as number)) return '—';
-      const p = Number.isFinite(price as number) ? price as number : 0;
-      const delta = oi! - p; //TODO
-      const sign = delta >= 0 ? '+' : '';
-      const emoji = delta > 0 ? '🔺' : delta < 0 ? '🔻' : '⚪';
-      return `${emoji}${sign}${delta.toFixed(2)}%`;
-    };
-
     const formatVolume = (v?: number): string => {
       if (!v || !Number.isFinite(v)) return '—';
-      // nice human readable: K/M
+      // Более красивое форматирование: округляем до 2 знаков
       if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
       if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
-      return v.toString();
+      return v.toFixed(2);
+    };
+    const formatQuoteVolume = (v?: number): string => {
+      if (!v || !Number.isFinite(v)) return '—';
+      const abs = Math.abs(v);
+      if (abs >= 1_000_000_000) return `$${(abs / 1_000_000_000).toFixed(2)}B`;
+      if (abs >= 1_000_000) return `$${(abs / 1_000_000).toFixed(2)}M`;
+      if (abs >= 1_000) return `$${(abs / 1_000).toFixed(2)}K`;
+      return `$${abs.toFixed(2)}`;
     };
 
     const timeStr = (signal.timestamp ?? new Date()).toLocaleTimeString('ru-RU', {
@@ -96,26 +88,55 @@ export class TelegramBotService {
     });
 
     const intervalDisplay = triggerIntervalMinutes ? `${triggerIntervalMinutes}m` : '';
-
     const binanceLink = this.generateBinanceLink(signal.symbol);
     const tradingViewLink = this.generateTradingViewLink(signal.symbol);
 
-    const oiText = formatPercentWithEmoji(signal.oiChangePercent);
-    const priceText = formatPercentWithEmoji(signal.priceChangePercent ?? undefined);
-    const deltaText = formatDelta(signal.oiChangePercent, signal.priceChangePercent);
+    // OI форматирование
+    const oiValue = signal.oiChangePercent ?? 0;
+    const oiSign = oiValue >= 0 ? '+' : '';
+    const oiEmoji = oiValue > 0 ? '🟢' : oiValue < 0 ? '🔴' : '⚪';
+    const oiArrow = oiValue > 0 ? '↗️' : oiValue < 0 ? '↘️' : '→';
 
-    const totalVolText = formatVolume(signal.totalVolume);
-    const deltaVolText = signal.deltaVolume ? formatVolume(signal.deltaVolume) : '—';
-
-    // Price display
+    // Price форматирование
+    const priceValue = signal.priceChangePercent ?? 0;
+    const priceSign = priceValue >= 0 ? '+' : '';
     const priceStr = this.formatPrice(signal.currentPrice ?? 0);
 
+    // Дивергенция (разница между OI и ценой)
+    const divergence = oiValue - priceValue;
+    const divSign = divergence >= 0 ? '+' : '';
+    const divEmoji = divergence > 0 ? '🔺' : divergence < 0 ? '🔻' : '⚪';
+    const divLabel = divergence > 0 ? 'быки' : divergence < 0 ? 'медведи' : 'нейтрал';
+
+    // Volume
+    const totalVolText = formatVolume(signal.totalVolume);
+    const totalQuoteVolText = formatQuoteVolume(signal.totalQuoteVolume);
+    const deltaQuoteValue = signal.deltaQuoteVolume ?? 0;
+    const deltaQuoteText = formatQuoteVolume(Math.abs(deltaQuoteValue));
+    const deltaQuoteSign = deltaQuoteValue >= 0 ? '' : '-';
+    const deltaVolValue = signal.deltaVolume ?? 0;
+    const deltaVolText = formatVolume(Math.abs(deltaVolValue));
+    const deltaVolEmoji = deltaVolValue < 0 ? '🔴' : deltaVolValue > 0 ? '🟢' : '⚪';
+    const deltaVolSign = deltaVolValue >= 0 ? '' : '-';
+    const deltaVolLabel = deltaVolValue < 0 ? 'продажи' : deltaVolValue > 0 ? 'покупки' : 'нейтрал';
+    const volumeRatioValue = signal.volumeRatioQuote ?? signal.volumeRatio ?? null;
+    const volumeRatioText = volumeRatioValue !== null ? `${volumeRatioValue.toFixed(2)}x` : '—';
+    const volumeRatioEmoji = volumeRatioValue === null ? '⚪' : volumeRatioValue > 1 ? '🚀' : volumeRatioValue < 1 ? '📉' : '⚪';
+    const baselineVolumeText = formatQuoteVolume(signal.volumeBaselineQuote ?? signal.volumeBaseline);
+
     return `
-🚨 №${signal.signalNumber} - <a href="${binanceLink}">${signal.symbol}</a> ${intervalDisplay}
-OI: ${oiText} | Price: ${priceText} | Δ: ${deltaText}
-📊 Vol: ${totalVolText} | ΔVol: ${deltaVolText}
-💵 ${priceStr} • ⏰ ${timeStr}
-<a href="${tradingViewLink}">Chart</a>
+🔔 <b>${signal.symbol}</b> · ${intervalDisplay}  
+💰 $${priceStr} (${priceSign}${priceValue.toFixed(2)}%) · ⏰ ${timeStr}
+
+━━━━━━━━━━━━━━━━
+${oiEmoji} Open Interest: <b>${oiSign}${oiValue.toFixed(2)}%</b> ${oiArrow}
+${divEmoji} Дивергенция: <b>${divSign}${Math.abs(divergence).toFixed(1)}%</b> (${divLabel})
+
+📊 Volume: ${totalVolText} (${totalQuoteVolText})
+   ├ Ratio: ${volumeRatioEmoji} ${volumeRatioText} vs prev ${baselineVolumeText}
+   └ Delta: ${deltaVolEmoji} ${deltaVolSign}${deltaVolText} / ${deltaQuoteSign}${deltaQuoteText} (${deltaVolLabel})
+
+<a href="${binanceLink}">📊 Binance</a> • <a href="${tradingViewLink}">📈 Chart</a>
     `.trim();
   }
 

@@ -18,7 +18,7 @@ const RECONNECT_DELAY = 5000; // base delay
 const OI_POLL_INTERVAL_MS_MIN = 13_000;
 const OI_BATCH_SIZE = 25; // as before
 const DELTA_FLUSH_INTERVAL_MS = 120;
-const AGGTRADE_BATCH_SIZE = 180;
+const AGGTRADE_BATCH_SIZE = 30;
 const OI_REQUEST_TIMEOUT = 7000;
 const LOAD_SYMBOLS_RETRIES = 5;
 const DELTA_MIN_QUOTE_THRESHOLD = 250; // configurable noise filter
@@ -217,7 +217,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     Object.defineProperty(ws, '_closeGracefully', {
       value: () => {
         closedByUs = true;
-        try { ws.terminate(); } catch (e) {}
+        try { ws.terminate(); } catch (e) { }
       },
       writable: false,
     });
@@ -233,7 +233,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       try {
         if (typeof s._closeGracefully === 'function') s._closeGracefully();
         else s.terminate();
-      } catch (e) {}
+      } catch (e) { }
     });
     this.aggTradeWsList = [];
 
@@ -395,7 +395,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     this.intentionalDisconnect = true; // предотвращаем автоматический reconnect
     this.connected = false;
     this.reconnecting = false;
-    
+
     this.stopOiPolling();
 
     if (this.deltaFlushTimer) clearInterval(this.deltaFlushTimer);
@@ -410,13 +410,13 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       try {
         if (typeof s._closeGracefully === 'function') s._closeGracefully();
         else s.terminate();
-      } catch (e) {}
+      } catch (e) { }
     });
     this.aggTradeWsList = [];
     this.aggSubscribed = false;
 
     if (this.ws) {
-      try { this.ws.terminate(); } catch (e) {}
+      try { this.ws.terminate(); } catch (e) { }
     }
     this.ws = null;
 
@@ -530,7 +530,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       this.reconnecting = false;
       // schedule another reconnect attempt (счетчик уже увеличен выше)
       if (!this.intentionalDisconnect) {
-        setTimeout(() => { this.handleReconnection().catch(() => {}); }, Math.min(backoff * 1.5, 60_000));
+        setTimeout(() => { this.handleReconnection().catch(() => { }); }, Math.min(backoff * 1.5, 60_000));
       }
     }
   }

@@ -2,16 +2,13 @@ import TelegramBot from 'node-telegram-bot-api';
 import { Injectable } from '../../shared/decorators';
 import { Logger } from '../../shared/logger';
 import { SignalDto } from '../../application/dto/signal.dto';
+import { MessageQueueService } from '../services/message-queue.service';
 
 @Injectable()
 export class TelegramBotService {
   private bot: TelegramBot;
   private readonly logger = new Logger(TelegramBotService.name);
-
-  // Rate limiting for Telegram API (30 messages per second)
-  private readonly messageQueue = new Map<number, Array<{ message: string; timestamp: number }>>();
-  private readonly MAX_MESSAGES_PER_SECOND = 25;
-  private readonly RATE_LIMIT_WINDOW_MS = 1000;
+  private readonly messageQueueService: MessageQueueService;
 
   // Detect market type from ENV for proper link generation
   private readonly marketType: string;
@@ -24,45 +21,56 @@ export class TelegramBotService {
     this.setupErrorHandling();
     this.setupBotCommands();
 
+    // Initialize message queue service
+    this.messageQueueService = new MessageQueueService();
+    this.messageQueueService.setSendCallback(this.sendMessageDirect.bind(this));
+    this.messageQueueService.start();
+
     // Detect primary market type from configuration
     this.marketType = this.detectMarketType();
     this.logger.info(`Telegram links configured for: ${this.marketType}`);
 
-    // Cleanup old queue entries every minute
-    setInterval(() => this.cleanupQueues(), 60_000);
+    // Log queue stats every 5 minutes
+    setInterval(() => this.logQueueStats(), 5 * 60_000);
   }
 
   public getBot(): TelegramBot {
     return this.bot;
   }
 
+  /**
+   * Send message - enqueues to smart queue
+   */
   public async sendMessage(chatId: number, message: string): Promise<void> {
-    try {
-      // Check rate limit
-      if (!(await this.checkRateLimit(chatId))) {
-        this.logger.warn(`Rate limit exceeded for chat ${chatId}, message queued`);
-        await this.delay(1000);
-      }
-
-      await this.bot.sendMessage(chatId, message, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      });
-
-      // Track message
-      this.trackMessage(chatId);
-    } catch (error) {
-      this.logger.error(`Failed to send Telegram message to chat ${chatId}:`, error);
-    }
+    this.messageQueueService.enqueue(chatId, message);
   }
 
+  /**
+   * Send signal - enqueues with priority based on signal strength
+   */
   public async sendSignal(
     chatId: number,
     signal: SignalDto,
     triggerIntervalMinutes?: number,
   ): Promise<void> {
     const message = this.formatSignalMessage(signal, triggerIntervalMinutes);
-    await this.sendMessage(chatId, message);
+    this.messageQueueService.enqueue(chatId, message, signal, triggerIntervalMinutes);
+  }
+
+  /**
+   * Direct message sending (called by MessageQueueService)
+   */
+  private async sendMessageDirect(chatId: number, message: string): Promise<boolean> {
+    try {
+      await this.bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      });
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to send Telegram message to chat ${chatId}:`, error);
+      return false;
+    }
   }
 
   private formatSignalMessage(signal: SignalDto, triggerIntervalMinutes?: number): string {
@@ -206,49 +214,15 @@ ${divEmoji} Дивергенция: <b>${divSign}${Math.abs(divergence).toFixed(
     return 'spot';
   }
 
-  private async checkRateLimit(chatId: number): Promise<boolean> {
-    const now = Date.now();
-    const queue = this.messageQueue.get(chatId) || [];
-
-    // Remove messages outside the rate limit window
-    const recentMessages = queue.filter((msg) => now - msg.timestamp < this.RATE_LIMIT_WINDOW_MS);
-
-    if (recentMessages.length >= this.MAX_MESSAGES_PER_SECOND) {
-      return false;
-    }
-
-    this.messageQueue.set(chatId, recentMessages);
-    return true;
-  }
-
-  private trackMessage(chatId: number): void {
-    const queue = this.messageQueue.get(chatId) || [];
-    queue.push({ message: '', timestamp: Date.now() });
-    this.messageQueue.set(chatId, queue);
-  }
-
-  private cleanupQueues(): void {
-    const now = Date.now();
-    let cleaned = 0;
-
-    for (const [chatId, queue] of this.messageQueue.entries()) {
-      const recentMessages = queue.filter((msg) => now - msg.timestamp < this.RATE_LIMIT_WINDOW_MS);
-      
-      if (recentMessages.length === 0) {
-        this.messageQueue.delete(chatId);
-        cleaned++;
-      } else {
-        this.messageQueue.set(chatId, recentMessages);
-      }
-    }
-
-    if (cleaned > 0) {
-      this.logger.debug(`🧹 Cleaned ${cleaned} empty message queues`);
-    }
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Log queue statistics
+   */
+  private logQueueStats(): void {
+    const stats = this.messageQueueService.getStats();
+    this.logger.info(
+      `📊 Queue stats: Sent=${stats.sent}, Dropped=${stats.dropped}, ` +
+      `Dedup=${stats.deduplicated}, Queue=[H:${stats.queueSizes.high} N:${stats.queueSizes.normal} L:${stats.queueSizes.low}]`,
+    );
   }
 
   private async setupBotCommands(): Promise<void> {
@@ -277,8 +251,16 @@ ${divEmoji} Дивергенция: <b>${divSign}${Math.abs(divergence).toFixed(
   }
 
   public async stop(): Promise<void> {
+    this.messageQueueService.stop();
     if (this.bot.isPolling()) {
       await this.bot.stopPolling();
     }
+  }
+
+  /**
+   * Get queue size for monitoring
+   */
+  public getQueueSize(): number {
+    return this.messageQueueService.getQueueSize();
   }
 }

@@ -22,6 +22,7 @@ export class TelegramBotService {
     }
     this.bot = new TelegramBot(token, { polling: true });
     this.setupErrorHandling();
+    this.setupBotCommands();
 
     // Detect primary market type from configuration
     this.marketType = this.detectMarketType();
@@ -248,6 +249,21 @@ ${divEmoji} Дивергенция: <b>${divSign}${Math.abs(divergence).toFixed(
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async setupBotCommands(): Promise<void> {
+    try {
+      await this.bot.setMyCommands([
+        { command: 'start', description: '🚀 Начать работу с ботом' },
+        { command: 'add', description: '➕ Создать новый триггер' },
+        { command: 'my_triggers', description: '📋 Показать мои триггеры' },
+        { command: 'uptime', description: '⏱️ Статус и время работы бота' },
+        { command: 'status', description: '📊 Статус бота (алиас /uptime)' },
+      ]);
+      this.logger.info('✅ Telegram bot commands menu configured');
+    } catch (error) {
+      this.logger.error('Failed to set bot commands:', error);
+    }
   }
 
   private setupErrorHandling(): void {

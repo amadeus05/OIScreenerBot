@@ -26,6 +26,7 @@ import { MarketDataGatewayService } from './infrastructure/market-data/market-da
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 import { BybitMarketDataProvider } from './infrastructure/market-data/providers/bybit.provider';
 import { OKXMarketDataProvider } from './infrastructure/market-data/providers/okx.provider';
+import { HybridMarketDataProvider } from './infrastructure/market-data/providers/hybrid.provider';
 import {
   IMarketDataProvider,
   MarketType,
@@ -235,6 +236,9 @@ function createProvider(config: ProviderConfig): IMarketDataProvider | null {
 
     case 'okx':
       return new OKXMarketDataProvider(marketType);
+
+    case 'hybrid':
+      return new HybridMarketDataProvider(marketType);
 
     default:
       return null;

@@ -1,16 +1,4 @@
-// domain/aggregator.types.ts
-export type MarketUpdatePayload = {
-    timestamp: number;
-    price?: number;
-    openInterest?: number;
-    volume?: number;
-    volumeBuy?: number;
-    volumeSell?: number;
-    volumeBuyQuote?: number;
-    volumeSellQuote?: number;
-    markPrice?: number;
-    fundingRate?: number;
-};
+// infrastructure/SortedBucketMap.ts
 
 export type Bucket = {
     oiOpen: number;
@@ -30,48 +18,127 @@ export type Bucket = {
     lastTs: number;
 };
 
-export type HealthStats = {
-    totalSymbols: number;
-    buckets15s: number;
-    buckets1m: number;
-    memoryEstimateMB: number;
-    oldestData: number;
-    newestData: number;
-    warmupRejects: number;
-    fallbacksUsed: number;
-};
-
-// infrastructure/SortedBucketMap.ts
+/**
+ * Высокопроизводительная карта с сохранением порядка ключей по возрастанию.
+ * Вставка: O(log n)
+ * Удаление: O(n) → но в нашем случае удаляем только старые (с начала) → O(1) amortized
+ * getSortedKeys(): O(1)
+ */
 export class SortedBucketMap {
-    private map: Map<number, Bucket> = new Map();
-    private sortedKeys: number[] | null = null;
+    private readonly map = new Map<number, Bucket>();
+    private readonly sortedKeys: number[] = [];
 
-    get size(): number { return this.map.size; }
+    get size(): number {
+        return this.map.size;
+    }
 
-    has(key: number): boolean { return this.map.has(key); }
-    get(key: number): Bucket | undefined { return this.map.get(key); }
+    has(key: number): boolean {
+        return this.map.has(key);
+    }
+
+    get(key: number): Bucket | undefined {
+        return this.map.get(key);
+    }
 
     set(key: number, value: Bucket): void {
-        const isNew = !this.map.has(key);
+        const existed = this.map.has(key);
         this.map.set(key, value);
-        if (isNew) this.sortedKeys = null;
+
+        // Если ключ уже был — ничего не делаем с sortedKeys
+        if (!existed) {
+            this.insertKeySorted(key);
+        }
     }
 
     delete(key: number): boolean {
         const existed = this.map.delete(key);
-        if (existed) this.sortedKeys = null;
+        if (existed) {
+            const idx = this.binarySearch(key);
+            if (idx !== -1 && this.sortedKeys[idx] === key) {
+                this.sortedKeys.splice(idx, 1);
+            }
+        }
         return existed;
     }
 
-    getSortedKeys(): number[] {
-        if (this.sortedKeys === null) {
-            this.sortedKeys = [...this.map.keys()].sort((a, b) => a - b);
-        }
+    /**
+     * Возвращает уже отсортированный массив ключей.
+     * Повторные вызовы — O(1)
+     */
+    getSortedKeys(): readonly number[] {
         return this.sortedKeys;
     }
 
-    entries(): IterableIterator<[number, Bucket]> { return this.map.entries(); }
-    values(): IterableIterator<Bucket> { return this.map.values(); }
-    keys(): IterableIterator<number> { return this.map.keys(); }
-    [Symbol.iterator](): IterableIterator<[number, Bucket]> { return this.map[Symbol.iterator](); }
+    entries(): IterableIterator<[number, Bucket]> {
+        return this.map.entries();
+    }
+
+    values(): IterableIterator<Bucket> {
+        return this.map.values();
+    }
+
+    keys(): IterableIterator<number> {
+        return this.map.keys();
+    }
+
+    [Symbol.iterator](): IterableIterator<[number, Bucket]> {
+        return this.map[Symbol.iterator]();
+    }
+
+    /** Удаляет первые N ключей (самые старые) — используется при cleanup */
+    deleteOldest(count: number): void {
+        for (let i = 0; i < count && this.sortedKeys.length > 0; i++) {
+            const key = this.sortedKeys.shift()!;
+            this.map.delete(key);
+        }
+    }
+
+    /** Вставляет ключ в отсортированный массив */
+    private insertKeySorted(key: number): void {
+        const idx = this.upperBound(key);
+        this.sortedKeys.splice(idx, 0, key);
+    }
+
+    /**
+     * Бинарный поиск: возвращает индекс, куда вставить key,
+     * чтобы сохранить порядок (аналог lower_bound в C++)
+     */
+    private upperBound(target: number): number {
+        let left = 0;
+        let right = this.sortedKeys.length;
+
+        while (left < right) {
+            const mid = (left + right) >>> 1;
+            if (this.sortedKeys[mid]! <= target) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
+        return left;
+    }
+
+    /** Бинарный поиск точного совпадения ключа */
+    private binarySearch(target: number): number {
+        let left = 0;
+        let right = this.sortedKeys.length - 1;
+
+        while (left <= right) {
+            const mid = (left + right) >>> 1;
+            const val = this.sortedKeys[mid]!;
+
+            if (val === target) return mid;
+            if (val < target) left = mid + 1;
+            else right = mid - 1;
+        }
+
+        return -1;
+    }
+
+    /** Полная очистка (для тестов или экстренного сброса) */
+    clear(): void {
+        this.map.clear();
+        this.sortedKeys.length = 0;
+    }
 }

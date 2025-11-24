@@ -1,5 +1,35 @@
 // infrastructure/SortedBucketMap.ts
 
+/**
+ * Extended PriceUpdate shape we expect providers to gradually adopt.
+ * Note: we do NOT change provider interface here — MarketDataGateway may
+ * still call updatePrice; but providers that support OI/volumeBuy/volumeSell
+ * should pass these into updateMarketData (see method below).
+ */
+export type MarketUpdatePayload = {
+    timestamp: number;
+    price?: number; // optional (we can operate on OI-only signals)
+    openInterest?: number; // cumulative OI at this timestamp (preferred)
+    volume?: number; // total volume in update (if only this is present)
+    volumeBuy?: number; // buyer-initiated volume
+    volumeSell?: number; // seller-initiated volume
+    volumeBuyQuote?: number; // buyer-initiated volume in quote currency
+    volumeSellQuote?: number; // seller-initiated volume in quote currency
+    markPrice?: number;
+    fundingRate?: number;
+};
+
+export type HealthStats = {
+    totalSymbols: number;
+    buckets15s: number;
+    buckets1m: number;
+    memoryEstimateMB: number;
+    oldestData: number;
+    newestData: number;
+    warmupRejects: number;
+    fallbacksUsed: number;
+};
+
 export type Bucket = {
     oiOpen: number;
     oiClose: number;

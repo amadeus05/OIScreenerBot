@@ -22,7 +22,7 @@ export class MetricsCalculator {
         const windowEnd = now;
 
         // Получаем OI и volume за окно
-        const movement = this.findOIAndVolumeWithinWindow(map, windowStart, windowEnd, bucketSize);
+        const movement = this.findOIAndVolumeWithinWindow(map, windowStart, windowEnd, bucketSize, currentOI, currentPrice);
 
         let oiChangePercent = 0;
         let oiStart = 0;
@@ -40,12 +40,23 @@ export class MetricsCalculator {
             deltaQuoteVolume = movement.deltaQuoteVolume;
         }
 
-        // Для OI: сначала проверяем основной метод
-        if (movement && movement.hasOI) {
-            oiChangePercent = movement.oiChangePercent;
-            oiStart = movement.oiStart;
-            oiEnd = movement.oiEnd;
+        // Для OI: используем Max Deviation logic
+        if (movement && movement.hasOI && currentOI !== undefined) {
+            // Calculate change from Min and Max
+            const changeFromMin = movement.minOI > 0 ? ((currentOI - movement.minOI) / movement.minOI) * 100 : 0;
+            const changeFromMax = movement.maxOI > 0 ? ((currentOI - movement.maxOI) / movement.maxOI) * 100 : 0;
+
+            // Pick the one with larger absolute value
+            if (Math.abs(changeFromMin) > Math.abs(changeFromMax)) {
+                oiChangePercent = changeFromMin;
+                oiStart = movement.minOI;
+            } else {
+                oiChangePercent = changeFromMax;
+                oiStart = movement.maxOI;
+            }
+            oiEnd = currentOI;
         } else {
+            // Fallback logic (original) if no movement detected or currentOI missing
             // try fallback interpolation для OI
             if (map.getSortedKeys().length > 0) {
                 const fallback = this.fallbackInterpolationForOI(map, windowStart, windowEnd, bucketSize, durationMs, minutes);
@@ -61,19 +72,34 @@ export class MetricsCalculator {
         let priceStart = 0;
         let priceEnd = currentPrice ?? 0;
 
-        // Price%: compute from boundary prices (interpolate if needed)
-        const startPrice = this.getPriceAtBoundary(map, windowStart);
-        const endPrice = this.getPriceAtBoundary(map, windowEnd) ?? (currentPrice ?? undefined);
+        // Price%: Max Deviation logic
+        if (movement && movement.priceFallbackStart !== undefined && currentPrice !== undefined) {
+            const changeFromMin = movement.minPrice > 0 ? ((currentPrice - movement.minPrice) / movement.minPrice) * 100 : 0;
+            const changeFromMax = movement.maxPrice > 0 ? ((currentPrice - movement.maxPrice) / movement.maxPrice) * 100 : 0;
 
-        if (startPrice !== null && endPrice !== undefined && startPrice > 0) {
-            priceStart = startPrice;
-            priceEnd = endPrice!;
-            priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
-        } else if (currentPrice && movement && movement.priceFallbackStart !== undefined) {
-            priceStart = movement.priceFallbackStart ?? currentPrice;
+            if (Math.abs(changeFromMin) > Math.abs(changeFromMax)) {
+                priceChangePercent = changeFromMin;
+                priceStart = movement.minPrice;
+            } else {
+                priceChangePercent = changeFromMax;
+                priceStart = movement.maxPrice;
+            }
             priceEnd = currentPrice;
-            if (priceStart > 0) {
+        } else {
+            // Fallback: compute from boundary prices (interpolate if needed)
+            const startPrice = this.getPriceAtBoundary(map, windowStart);
+            const endPrice = this.getPriceAtBoundary(map, windowEnd) ?? (currentPrice ?? undefined);
+
+            if (startPrice !== null && endPrice !== undefined && startPrice > 0) {
+                priceStart = startPrice;
+                priceEnd = endPrice!;
                 priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+            } else if (currentPrice && movement && movement.priceFallbackStart !== undefined) {
+                priceStart = movement.priceFallbackStart ?? currentPrice;
+                priceEnd = currentPrice;
+                if (priceStart > 0) {
+                    priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+                }
             }
         }
 
@@ -85,6 +111,7 @@ export class MetricsCalculator {
 
         const previousWindowStart = windowStart - durationMs;
         if (previousWindowStart >= 0) {
+            // For baseline we still use the simple window sum, as "Max Deviation" doesn't apply to volume sum
             const prevMovement = this.findOIAndVolumeWithinWindow(map, previousWindowStart, windowStart, bucketSize);
             if (prevMovement) {
                 volumeBaseline = prevMovement.totalVolume;
@@ -120,6 +147,8 @@ export class MetricsCalculator {
         windowStart: number,
         windowEnd: number,
         bucketSize: number,
+        currentOI?: number,
+        currentPrice?: number
     ) {
         const keys = map.getSortedKeys();
         if (keys.length === 0) return null;
@@ -132,6 +161,22 @@ export class MetricsCalculator {
         let totalQuoteSell = 0;
         let priceFallbackStart: number | undefined;
         let seenAny = false;
+
+        // Track Min/Max for OI and Price
+        let minOI = Number.MAX_VALUE;
+        let maxOI = Number.MIN_VALUE;
+        let minPrice = Number.MAX_VALUE;
+        let maxPrice = Number.MIN_VALUE;
+
+        // Initialize with current values if available
+        if (currentOI !== undefined) {
+            minOI = currentOI;
+            maxOI = currentOI;
+        }
+        if (currentPrice !== undefined) {
+            minPrice = currentPrice;
+            maxPrice = currentPrice;
+        }
 
         for (let i = 0; i < keys.length; i++) {
             const bucketTime = keys[i];
@@ -162,9 +207,38 @@ export class MetricsCalculator {
             if (priceFallbackStart === undefined && b.priceOpen !== null) {
                 priceFallbackStart = b.priceOpen!;
             }
+
+            // Update Min/Max OI
+            if (Number.isFinite(b.oiLow)) minOI = Math.min(minOI, b.oiLow);
+            if (Number.isFinite(b.oiHigh)) maxOI = Math.max(maxOI, b.oiHigh);
+            // Fallback to open/close if high/low missing
+            if (Number.isFinite(b.oiOpen)) {
+                minOI = Math.min(minOI, b.oiOpen);
+                maxOI = Math.max(maxOI, b.oiOpen);
+            }
+            if (Number.isFinite(b.oiClose)) {
+                minOI = Math.min(minOI, b.oiClose);
+                maxOI = Math.max(maxOI, b.oiClose);
+            }
+
+            // Update Min/Max Price
+            if (b.priceOpen !== null && Number.isFinite(b.priceOpen)) {
+                minPrice = Math.min(minPrice, b.priceOpen);
+                maxPrice = Math.max(maxPrice, b.priceOpen);
+            }
+            if (b.priceClose !== null && Number.isFinite(b.priceClose)) {
+                minPrice = Math.min(minPrice, b.priceClose);
+                maxPrice = Math.max(maxPrice, b.priceClose);
+            }
         }
 
         if (!seenAny) return null;
+
+        // If we didn't find any valid OI/Price in buckets (and no current provided), reset to 0
+        if (minOI === Number.MAX_VALUE) minOI = 0;
+        if (maxOI === Number.MIN_VALUE) maxOI = 0;
+        if (minPrice === Number.MAX_VALUE) minPrice = 0;
+        if (maxPrice === Number.MIN_VALUE) maxPrice = 0;
 
         const oiStart = this.getOIAtBoundary(map, windowStart);
         const oiEnd = this.getOIAtBoundary(map, windowEnd);
@@ -187,6 +261,10 @@ export class MetricsCalculator {
             deltaVolume: totalBuy - totalSell,
             deltaQuoteVolume: totalQuoteBuy - totalQuoteSell,
             priceFallbackStart,
+            minOI,
+            maxOI,
+            minPrice,
+            maxPrice
         };
     }
 

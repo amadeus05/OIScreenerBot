@@ -9,6 +9,8 @@ import { MarketUpdatePayload, HealthStats } from "./aggregators/aggregator.types
 import { MarketStateManager } from "./aggregators/market-state.manager";
 import { BucketRepository } from "./aggregators/bucket.repository";
 import { MetricsCalculator } from "./aggregators/metrics-calculator";
+import { MarketDataAccessor } from "../../domain/interfaces/market-data-accessor.interface";
+import { AggregatorDataAccessor } from "../../infrastructure/adapters/aggregator-data-accessor.adapter";
 
 @Injectable()
 export class DataAggregatorService implements IDataAggregatorService {
@@ -33,6 +35,18 @@ export class DataAggregatorService implements IDataAggregatorService {
         this.stateManager = new MarketStateManager(this.logger);
         this.bucketRepo = new BucketRepository(this.logger);
         this.calculator = new MetricsCalculator();
+    }
+
+    public getStateManager() {
+        return this.stateManager;
+    }
+
+    public getBucketRepo() {
+        return this.bucketRepo;
+    }
+
+    public createAccessor(): MarketDataAccessor {
+        return new AggregatorDataAccessor(this);
     }
 
     // ---------------- PUBLIC API ----------------

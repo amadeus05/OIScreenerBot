@@ -1,4 +1,4 @@
-import { MarketUpdatePayload } from '@infrastructure/services/data-aggregator.service';
+import { MarketUpdatePayload } from '@infrastructure/services/aggregators/aggregator.types';
 import { Trigger } from '../entities/trigger.entity';
 
 export interface IDataPoint {
@@ -37,6 +37,7 @@ export interface IDataAggregatorService {
   getHistoryLength(symbol: string): number;
   getCurrentPrice(symbol: string): number;
   setTriggerEngine(engine: ITriggerEngineService): void;
+  createAccessor(): import('../interfaces/market-data-accessor.interface').MarketDataAccessor;
 }
 
 export interface IMarketDataGateway {

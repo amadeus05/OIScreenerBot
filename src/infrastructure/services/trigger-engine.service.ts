@@ -8,15 +8,7 @@ import { ITriggerRepository } from '../../domain/interfaces/repositories.interfa
 import { Trigger } from '../../domain/entities/trigger.entity';
 import { Logger } from '../../shared/logger';
 import { UptimeService } from './uptime.service';
-
-// Backwards-compatible TriggerEngineService with optimisations:
-// - batched symbol processing (queue with debounce)
-// - grouping triggers by symbol (per-symbol and global triggers)
-// - per-(trigger,symbol) rate-limiting with dynamic backoff
-// - metric caching with price-based invalidation tuned to trigger threshold
-// - separate cooldown for notifications to avoid duplicates
-// - concurrency protection for same trigger+symbol
-// - debug logging behind env flag
+import { OIVelocityFilter } from '../../modules/decision-system/filters/oi-velocity.filter';
 
 const BATCH_PROCESSING_SIZE = Number(process.env.BATCH_PROCESSING_SIZE) || 10;
 const PENDING_FLUSH_MS = Number(process.env.TRIGGER_ENGINE_FLUSH_MS) || 50; // flush pending symbols every 50ms (быстрее!)
@@ -28,38 +20,34 @@ export class TriggerEngineService implements ITriggerEngineService {
   private readonly logger = new Logger(TriggerEngineService.name);
   private isRunning = false;
 
-  // pendingSymbols stores last price and timestamp to allow price-aware cache invalidation
   private pendingSymbols = new Map<string, { price: number; timestamp: number }>();
 
-  // timing and state maps
   private lastCheckTime = new Map<string, number>(); // last attempt time for check (per trigger+symbol)
   private runningChecks = new Set<string>(); // currently running checks keys
-  // REMOVED: lastNotificationTime (дублирует кулдаун в NotificationService)
-  // REMOVED: consecutiveFires (убрали экспоненциальный бэкофф)
 
-  // metric local cache: `${symbol}_${interval}` -> { ts, metrics }
   private metricCache = new Map<string, { ts: number; metrics: any }>();
 
   private pendingTimer: NodeJS.Timeout | null = null;
   private healthTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
 
-  // configuration knobs
   private readonly MIN_CHECK_INTERVAL_MS = DEFAULT_MIN_CHECK_INTERVAL_MS;
-  // REMOVED: DEBOUNCE_THRESHOLD (убрали экспоненциальный бэкофф)
+
+  private readonly velocityFilter: OIVelocityFilter;
 
   constructor(
     @Inject('ITriggerRepository') private readonly triggerRepository: ITriggerRepository,
     @Inject('IDataAggregatorService') private readonly dataAggregator: IDataAggregatorService,
     @Inject('INotificationService') private readonly notificationService: INotificationService,
     private readonly uptimeService: UptimeService,
-  ) {}
+  ) {
+    this.velocityFilter = new OIVelocityFilter();
+  }
 
   public start(): void {
     if (this.isRunning) return;
     this.isRunning = true;
 
-    // schedule health-checks and cleanup only after explicit start (better for DI & tests)
     this.healthTimer = setInterval(() => this.logHealth(), 5 * 60 * 1000);
     this.cleanupTimer = setInterval(() => this.cleanupFireCounters(), 10 * 60 * 1000);
 
@@ -90,7 +78,6 @@ export class TriggerEngineService implements ITriggerEngineService {
     this.logger.info('TriggerEngineService stopped');
   }
 
-  // Called by DataAggregator on each tick. We only store latest price and batch-process.
   public async onPriceUpdate(symbol: string, price: number): Promise<void> {
     if (!this.isRunning || !symbol) return;
 
@@ -101,14 +88,12 @@ export class TriggerEngineService implements ITriggerEngineService {
     }
   }
 
-  // Flush a batch of pending symbols and evaluate triggers for them
   private async flushPendingSymbols(): Promise<void> {
     if (!this.isRunning) return;
 
     const work = Array.from(this.pendingSymbols.entries()).slice(0, BATCH_PROCESSING_SIZE);
     for (const [symbol] of work) this.pendingSymbols.delete(symbol);
 
-    // rearm timer if still pending
     if (this.pendingSymbols.size === 0 && this.pendingTimer) {
       clearTimeout(this.pendingTimer);
       this.pendingTimer = null;
@@ -119,17 +104,13 @@ export class TriggerEngineService implements ITriggerEngineService {
 
     if (work.length === 0) return;
 
-    // load active triggers once per flush to reduce repository hits
     const activeTriggers = this.triggerRepository.getAllActive();
     if (!activeTriggers || activeTriggers.length === 0) return;
 
-    // group and sort triggers
     const triggersBySymbol = this.groupAndSortTriggers(activeTriggers);
 
-    // iterate symbols; processing them sequentially improves metric cache hit-rate
     for (const [symbol, { price: currentPrice }] of work) {
       try {
-        // skip if aggregator considers symbol cold (optional helper)
         // @ts-ignore
         if (typeof (this.dataAggregator as any).isWarm === 'function') {
           // @ts-ignore
@@ -153,28 +134,23 @@ export class TriggerEngineService implements ITriggerEngineService {
     }
   }
 
-  // Group triggers by symbol key and sort each group by priority (higher threshold first)
   private groupAndSortTriggers(triggers: Trigger[]): Map<string, Trigger[]> {
     const result = new Map<string, Trigger[]>();
 
-    // Trigger has no symbol field → all triggers are global
     const key = '*';
     const arr: Trigger[] = [];
     for (const t of triggers) arr.push(t);
 
-    // sort by threshold (now OI)
     arr.sort((a, b) => (b.oiChangePercent ?? 0) - (a.oiChangePercent ?? 0));
     result.set(key, arr);
 
     return result;
   }
 
-  // Rate-limit wrapper: avoids frequent checks and concurrent checks for same trigger+symbol
   private async checkTriggerWithRateLimit(trigger: Trigger, symbol: string, currentPrice: number): Promise<void> {
     const checkKey = `${trigger.id}-${symbol}`;
     const now = Date.now();
 
-    // Простая проверка интервала без экспоненциального бэкоффа
     const last = this.lastCheckTime.get(checkKey) || 0;
     if (now - last < this.MIN_CHECK_INTERVAL_MS) return;
 
@@ -189,73 +165,130 @@ export class TriggerEngineService implements ITriggerEngineService {
     }
   }
 
-  // Main check logic. Accepts latest currentPrice to allow price-aware decisions.
   private async checkTrigger(trigger: Trigger, symbol: string, currentPrice: number): Promise<void> {
     const checkKey = `${trigger.id}-${symbol}`;
-
+    
     try {
-      const metricKey = `${symbol}_${trigger.timeIntervalMinutes}`;
-      const cached = this.metricCache.get(metricKey);
-      let metrics: any = null;
-
-      // Dynamic invalidation: if cached exists and price moved significantly vs trigger threshold
-      const thresholdPercent = Math.abs(trigger.oiChangePercent || 0);
-      // fallback to 1% if threshold is missing or tiny
-      const effectiveThreshold = Math.max(thresholdPercent, 1);
-      const invalidateLevel = Math.max(effectiveThreshold / 200, 0.005); // half of threshold (%) divided by 100
-
-      const shouldInvalidateCache = !!cached &&
-        Number.isFinite(cached.metrics?.currentPrice) &&
-        Math.abs((cached.metrics.currentPrice - currentPrice) / currentPrice) > (invalidateLevel);
-
-      if (cached && !shouldInvalidateCache && Date.now() - cached.ts < METRIC_CACHE_TTL_MS) {
-        metrics = cached.metrics;
-      } else {
-        metrics = await this.dataAggregator.getMetricChanges(symbol, trigger.timeIntervalMinutes);
-        // ensure metrics has currentPrice (prefer newest tick)
-        if (!metrics) {
-          this.metricCache.set(metricKey, { ts: Date.now(), metrics: null });
-        } else {
-          metrics.currentPrice = currentPrice;
-          this.metricCache.set(metricKey, { ts: Date.now(), metrics });
+      const now = Date.now();
+      const mainWindowStart = now - trigger.timeIntervalMinutes * 60000;
+      
+      const alignedWindowEnd = this.alignToBucketBoundary(now);
+      const alignedWindowStart = this.alignToBucketBoundary(mainWindowStart);
+      
+      const mainMetrics = await this.dataAggregator.getMetricChangesForWindow(
+        symbol, alignedWindowStart, alignedWindowEnd
+      );
+      
+      const subWindowResults = await this.checkSubWindows(
+        trigger, symbol, currentPrice, alignedWindowStart, alignedWindowEnd
+      );
+      
+      if (mainMetrics && this.shouldTriggerFire(trigger, mainMetrics, symbol)) {
+        this.fireTrigger(trigger, symbol, mainMetrics, "main-window");
+      }
+      
+      for (const result of subWindowResults) {
+        if (result.shouldFire) {
+          this.fireTrigger(trigger, symbol, result.metrics, `sub-window-${result.windowType}`);
         }
       }
-
-      if (!metrics) {
-        if (this.isDebug()) this.logger.debug(`No metrics for ${symbol}@${trigger.timeIntervalMinutes}m`);
-        return;
-      }
-
-      if (this.isDebug()) {
-        const pct = Number.isFinite(metrics.oiChangePercent) ? metrics.oiChangePercent.toFixed(2) : 'NaN';
-        this.logger.debug(`Eval trigger=${trigger.id} symbol=${symbol} interval=${trigger.timeIntervalMinutes}m actual OI=${pct}% currentPrice=${metrics.currentPrice}`);
-      }
-
-      if (this.shouldTriggerFire(trigger, metrics)) {
-        this.logger.info(`🎯 Trigger ${trigger.id} fired for ${symbol} (OI: ${metrics.oiChangePercent.toFixed(2)}%)`);
-
-        // Отправляем в NotificationService - там уже есть кулдаун!
-        try {
-          await this.notificationService.processTrigger(trigger, symbol, metrics);
-        } catch (err) {
-          this.logger.error(`notificationService failed for trigger=${trigger.id} symbol=${symbol}:`, err);
-        }
-      }
+      
     } catch (err) {
       this.logger.error(`Error checking trigger ${trigger.id} for ${symbol}:`, err);
     }
   }
 
-  // Should fire: compare OI (primary)
-  private shouldTriggerFire(trigger: Trigger, metrics: { oiChangePercent: number; priceChangePercent?: number }): boolean {
+  private async checkSubWindows(
+    trigger: Trigger, 
+    symbol: string, 
+    currentPrice: number,
+    windowStart: number,
+    windowEnd: number
+  ): Promise<Array<{shouldFire: boolean, metrics: any, windowType: string}>> {
+    const results = [];
+    
+    const alignedWindowEnd = this.alignToBucketBoundary(windowEnd);
+    const alignedWindowStart = this.alignToBucketBoundary(windowStart);
+    
+    const subWindowDurations = [5, 10, 15];
+    
+    for (const duration of subWindowDurations) {
+      if (duration >= trigger.timeIntervalMinutes) continue;
+      
+      const subWindowEnd = alignedWindowEnd;
+      const subWindowStart = this.alignToBucketBoundary(alignedWindowEnd - duration * 60000);
+      
+      if (subWindowStart >= alignedWindowStart) {
+        const metrics = await this.dataAggregator.getMetricChangesForWindow(
+          symbol, subWindowStart, subWindowEnd
+        );
+        
+        if (metrics) {
+          const shouldFire = this.shouldTriggerFire(trigger, metrics, symbol);
+          results.push({
+            shouldFire,
+            metrics,
+            windowType: `${duration}m`,
+            windowStart: subWindowStart,
+            windowEnd: subWindowEnd
+          });
+        }
+      }
+    }
+    
+    return results;
+  }
+
+  private fireTrigger(trigger: Trigger, symbol: string, metrics: any, windowType: string): void {
+    this.logger.info(` Trigger ${trigger.id} fired for ${symbol} (${windowType}, OI: ${metrics.oiChangePercent.toFixed(2)}%)`);
+    
+    try {
+      metrics.windowType = windowType;
+      metrics.windowDuration = windowType.includes('m') ? 
+        parseInt(windowType.replace('m', '')) : trigger.timeIntervalMinutes;
+      
+      void this.notificationService.processTrigger(trigger, symbol, metrics);
+    } catch (err) {
+      this.logger.error(`notificationService failed for trigger=${trigger.id} symbol=${symbol}:`, err);
+    }
+  }
+
+  private shouldTriggerFire(trigger: Trigger, metrics: any, symbol: string): boolean {
     const actual = metrics?.oiChangePercent;
     if (!Number.isFinite(actual)) return false;
 
     const threshold = Number(trigger.oiChangePercent) || 0;
-    if (trigger.direction === 'up') return actual >= threshold;
+    const basicPass = trigger.direction === 'up'
+      ? actual >= threshold
+      : actual <= -Math.abs(threshold);
 
-    // down: actual is usually negative, threshold is positive
-    return actual <= -Math.abs(threshold);
+    if (!basicPass) return false;
+
+    const accessor = this.dataAggregator.createAccessor();
+    const velocityResult = this.velocityFilter.evaluate(
+      symbol,
+      accessor,
+      {
+        percent: trigger.oiChangePercent,
+        oiIntervalMin: trigger.timeIntervalMinutes,
+      }
+    );
+    console.log(`[VelocityFilter ${symbol}]: ${JSON.stringify(velocityResult)} | trigger ${trigger.id}`);
+    if (!velocityResult.pass) {
+      console.log(`[VelocityFilter] BLOCKED: ${velocityResult.reason} | trigger ${trigger.id}`);
+      if (this.isDebug()) {
+        this.logger.debug(`[VelocityFilter] BLOCKED: ${velocityResult.reason} | trigger ${trigger.id}`);
+      }
+      return false;
+    }
+
+    if (velocityResult.tags?.includes('ACCELERATING')) {
+      metrics.velocity = velocityResult.velocity;
+      metrics.acceleration = velocityResult.acceleration;
+      metrics.velocityTags = velocityResult.tags;
+    }
+
+    return true;
   }
 
   private logHealth(): void {
@@ -279,7 +312,7 @@ export class TriggerEngineService implements ITriggerEngineService {
 
   private cleanupFireCounters(): void {
     const now = Date.now();
-    const staleThreshold = 30 * 60 * 1000; // 30 minutes
+    const staleThreshold = 30 * 60 * 1000;
 
     for (const [k, ts] of Array.from(this.lastCheckTime.entries())) {
       if (now - ts > staleThreshold) {
@@ -292,6 +325,10 @@ export class TriggerEngineService implements ITriggerEngineService {
 
   private isDebug(): boolean {
     return Boolean(process.env.DEBUG_TRIGGER_ENGINE);
+  }
+
+  private alignToBucketBoundary(timestamp: number, bucketSizeMs: number = 60000): number {
+    return Math.floor(timestamp / bucketSizeMs) * bucketSizeMs;
   }
 }
 

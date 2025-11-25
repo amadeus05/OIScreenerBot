@@ -9,7 +9,7 @@ import { MarketUpdatePayload, HealthStats } from "./aggregators/aggregator.types
 import { MarketStateManager } from "./aggregators/market-state.manager";
 import { BucketRepository } from "./aggregators/bucket.repository";
 import { MetricsCalculator } from "./aggregators/metrics-calculator";
-import { MarketDataAccessor } from "../../domain/interfaces/market-data-accessor.interface";
+import { MarketDataAccessor, OIPoint, VolumeData, VolumePoint } from "../../domain/interfaces/market-data-accessor.interface";
 import { AggregatorDataAccessor } from "../../infrastructure/adapters/aggregator-data-accessor.adapter";
 
 @Injectable()
@@ -60,16 +60,13 @@ export class DataAggregatorService implements IDataAggregatorService {
 
         const ts = Number.isFinite(payload.timestamp) ? Math.floor(payload.timestamp) : Date.now();
 
-        // 1. Update State (Price, OI, Last Seen)
         this.stateManager.updateState(symbol, ts, payload.price, payload.openInterest);
 
-        // 2. Ingest Data into Buckets
         const lastPrice = this.stateManager.lastKnownPrices.get(symbol);
         const lastOI = this.stateManager.lastKnownOI.get(symbol);
 
         this.bucketRepo.addRawPoint(symbol, { ...payload, timestamp: ts }, lastPrice, lastOI);
 
-        // 3. Trigger Engine Notification
         if (this.triggerEngine?.onPriceUpdate) {
             try {
                 const priceForCallback = payload.price ?? lastPrice ?? 0;
@@ -96,15 +93,15 @@ export class DataAggregatorService implements IDataAggregatorService {
         }
 
         const firstSeen = this.stateManager.firstSeen.get(symbol) ?? Date.now();
-        const neededHistory = timeIntervalMinutes * 60_000;
-        if ((Date.now() - firstSeen) < neededHistory) {
+        const bucketSize = resolution === '15s' ? 15_000 : 60_000;
+        
+        if ((Date.now() - firstSeen) < bucketSize) {
             this.warmupRejects++;
             return null;
         }
 
         const currentPrice = this.stateManager.lastKnownPrices.get(symbol);
         const currentOI = this.stateManager.lastKnownOI.get(symbol);
-        const bucketSize = resolution === '15s' ? 15_000 : 60_000;
 
         const result = this.calculator.calculateWindow(
             bucketMap,
@@ -116,6 +113,34 @@ export class DataAggregatorService implements IDataAggregatorService {
 
         if (result) this.metricsCalculated++;
         return result;
+    }
+
+    public getMetricChangesForWindow(symbol: string, startTime: number, endTime: number): IMetricChanges | null {
+        if (!symbol || startTime >= endTime) return null;
+
+        const durationMs = endTime - startTime;
+        const minutes = durationMs / 60000;
+        const resolution = minutes <= 2 ? '15s' : '1m';
+        const store = this.bucketRepo.getStore(resolution);
+        const bucketMap = store.get(symbol);
+
+        if (!bucketMap || bucketMap.size === 0) {
+            if (this.DEBUG) this.logger.debug(`❌ No data for ${symbol} in window`);
+            return null;
+        }
+
+        const bucketSize = resolution === '15s' ? 15_000 : 60_000;
+        const currentPrice = this.stateManager.lastKnownPrices.get(symbol);
+        const currentOI = this.stateManager.lastKnownOI.get(symbol);
+
+        return this.calculator.calculateWindowForTimeRange(
+            bucketMap,
+            startTime,
+            endTime,
+            bucketSize,
+            currentPrice,
+            currentOI
+        );
     }
 
     public getAllKnownSymbols(): string[] {
@@ -264,5 +289,73 @@ export class DataAggregatorService implements IDataAggregatorService {
 
     public getOutOfOrderStats(symbol?: string): Record<string, number> | number {
         return this.stateManager.getOutOfOrderStats(symbol);
+    }
+
+    public getOISeriesInRange(symbol: string, from: number, to: number): OIPoint[] {
+        const store = this.bucketRepo.getStore('1m');
+        const bucketMap = store.get(symbol);
+        
+        if (!bucketMap) return [];
+        
+        const points: OIPoint[] = [];
+        const keys = bucketMap.getSortedKeys();
+        
+        for (const key of keys) {
+            if (key >= from && key <= to) {
+                const bucket = bucketMap.get(key);
+                if (bucket && Number.isFinite(bucket.oiClose)) {
+                    points.push({ ts: key, value: bucket.oiClose });
+                }
+            }
+        }
+        
+        return points;
+    }
+
+    public getVolumeSeriesInRange(symbol: string, from: number, to: number): VolumePoint[] {
+        const store = this.bucketRepo.getStore('1m');
+        const bucketMap = store.get(symbol);
+        
+        if (!bucketMap) return [];
+        
+        const points: VolumePoint[] = [];
+        const keys = bucketMap.getSortedKeys();
+        
+        for (const key of keys) {
+            if (key >= from && key <= to) {
+                const bucket = bucketMap.get(key);
+                if (bucket && Number.isFinite(bucket.totalVolume)) {
+                    points.push({ 
+                        ts: key, 
+                        value: bucket.totalVolume,
+                        volumeBuy: bucket.volumeBuy,
+                        volumeSell: bucket.volumeSell,
+                        totalQuoteVolume: bucket.totalQuoteVolume
+                    });
+                }
+            }
+        }
+        
+        return points;
+    }
+
+    public getCurrentVolume(symbol: string): VolumeData | undefined {
+        const store = this.bucketRepo.getStore('1m');
+        const bucketMap = store.get(symbol);
+        if (!bucketMap) return undefined;
+        
+        const keys = bucketMap.getSortedKeys();
+        const latestKey = keys[keys.length - 1];
+        const latestBucket = bucketMap.get(latestKey);
+        
+        if (!latestBucket) return undefined;
+        
+        return {
+            totalVolume: latestBucket.totalVolume,
+            volumeBuy: latestBucket.volumeBuy,
+            volumeSell: latestBucket.volumeSell,
+            totalQuoteVolume: latestBucket.totalQuoteVolume,
+            timestamp: latestKey
+        };
     }
 }

@@ -142,6 +142,137 @@ export class MetricsCalculator {
         };
     }
 
+    public calculateWindowForTimeRange(
+        map: SortedBucketMap,
+        startTime: number,
+        endTime: number,
+        bucketSize: number,
+        currentPrice: number | undefined,
+        currentOI: number | undefined
+    ): IMetricChanges | null {
+        const durationMs = endTime - startTime;
+
+        // Получаем OI и volume за указанное окно
+        const movement = this.findOIAndVolumeWithinWindow(map, startTime, endTime, bucketSize, currentOI, currentPrice);
+
+        let oiChangePercent = 0;
+        let oiStart = 0;
+        let oiEnd = 0;
+        let totalVolume = 0;
+        let totalQuoteVolume = 0;
+        let deltaVolume = 0;
+        let deltaQuoteVolume = 0;
+
+        // Volume берем из movement (если есть)
+        if (movement) {
+            totalVolume = movement.totalVolume;
+            deltaVolume = movement.deltaVolume;
+            totalQuoteVolume = movement.totalQuoteVolume;
+            deltaQuoteVolume = movement.deltaQuoteVolume;
+        }
+
+        // Для OI: используем Max Deviation logic
+        if (movement && movement.hasOI && currentOI !== undefined) {
+            // Calculate change from Min and Max
+            const changeFromMin = movement.minOI > 0 ? ((currentOI - movement.minOI) / movement.minOI) * 100 : 0;
+            const changeFromMax = movement.maxOI > 0 ? ((currentOI - movement.maxOI) / movement.maxOI) * 100 : 0;
+
+            // Pick the one with larger absolute value
+            if (Math.abs(changeFromMin) > Math.abs(changeFromMax)) {
+                oiChangePercent = changeFromMin;
+                oiStart = movement.minOI;
+            } else {
+                oiChangePercent = changeFromMax;
+                oiStart = movement.maxOI;
+            }
+            oiEnd = currentOI;
+        } else {
+            // Fallback logic (original) if no movement detected or currentOI missing
+            // try fallback interpolation для OI
+            if (map.getSortedKeys().length > 0) {
+                const fallback = this.fallbackInterpolationForOI(map, startTime, endTime, bucketSize, durationMs, 0); // Assuming minutes is not used for fallback interpolation here
+                if (fallback) {
+                    oiChangePercent = fallback.oiChangePercent;
+                    oiStart = fallback.oiStart;
+                    oiEnd = fallback.oiEnd;
+                }
+            }
+        }
+
+        let priceChangePercent = 0;
+        let priceStart = 0;
+        let priceEnd = currentPrice ?? 0;
+
+        // Price%: Max Deviation logic
+        if (movement && movement.priceFallbackStart !== undefined && currentPrice !== undefined) {
+            const changeFromMin = movement.minPrice > 0 ? ((currentPrice - movement.minPrice) / movement.minPrice) * 100 : 0;
+            const changeFromMax = movement.maxPrice > 0 ? ((currentPrice - movement.maxPrice) / movement.maxPrice) * 100 : 0;
+
+            if (Math.abs(changeFromMin) > Math.abs(changeFromMax)) {
+                priceChangePercent = changeFromMin;
+                priceStart = movement.minPrice;
+            } else {
+                priceChangePercent = changeFromMax;
+                priceStart = movement.maxPrice;
+            }
+            priceEnd = currentPrice;
+        } else {
+            // Fallback: compute from boundary prices (interpolate if needed)
+            const startPrice = this.getPriceAtBoundary(map, startTime);
+            const endPrice = this.getPriceAtBoundary(map, endTime) ?? (currentPrice ?? undefined);
+
+            if (startPrice !== null && endPrice !== undefined && startPrice > 0) {
+                priceStart = startPrice;
+                priceEnd = endPrice!;
+                priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+            } else if (currentPrice && movement && movement.priceFallbackStart !== undefined) {
+                priceStart = movement.priceFallbackStart ?? currentPrice;
+                priceEnd = currentPrice;
+                if (priceStart > 0) {
+                    priceChangePercent = Number((((priceEnd - priceStart) / priceStart) * 100).toFixed(6));
+                }
+            }
+        }
+
+        // Compose result
+        let volumeBaseline = 0;
+        let volumeBaselineQuote = 0;
+        let volumeRatio: number | null = null;
+        let volumeRatioQuote: number | null = null;
+
+        const previousWindowStart = startTime - durationMs;
+        if (previousWindowStart >= 0) {
+            // For baseline we still use the simple window sum, as "Max Deviation" doesn't apply to volume sum
+            const prevMovement = this.findOIAndVolumeWithinWindow(map, previousWindowStart, startTime, bucketSize);
+            if (prevMovement) {
+                volumeBaseline = prevMovement.totalVolume;
+                volumeBaselineQuote = prevMovement.totalQuoteVolume;
+                if (volumeBaseline > 0 && totalVolume > 0) {
+                    volumeRatio = Number((totalVolume / volumeBaseline).toFixed(3));
+                }
+                if (volumeBaselineQuote > 0 && totalQuoteVolume > 0) {
+                    volumeRatioQuote = Number((totalQuoteVolume / volumeBaselineQuote).toFixed(3));
+                }
+            }
+        }
+
+        return {
+            oiChangePercent: Number(oiChangePercent.toFixed(6)),
+            oiStart,
+            oiEnd,
+            totalVolume,
+            deltaVolume,
+            totalQuoteVolume,
+            deltaQuoteVolume,
+            volumeBaseline,
+            volumeBaselineQuote,
+            volumeRatio,
+            volumeRatioQuote,
+            priceChangePercent: Number(priceChangePercent),
+            timeWindowSeconds: Math.max(1, Math.floor(durationMs / 1000)),
+        };
+    }
+
     private findOIAndVolumeWithinWindow(
         map: SortedBucketMap,
         windowStart: number,
@@ -282,7 +413,7 @@ export class MetricsCalculator {
 
         const maxShift = Math.min(
             this.FALLBACK_SHIFT_MULTIPLIER * bucketSize,
-            durationMs * 0.05
+            durationMs * 0.5  // ← ИЗМЕНЕНО: с 0.05 на 0.5 (50% вместо 5%)
         );
 
         const beforeStart = keys.filter(k => k <= startBucket);

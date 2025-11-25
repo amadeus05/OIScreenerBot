@@ -34,6 +34,7 @@ export interface IMetricChanges {
 export interface IDataAggregatorService {
   updateMarketData(symbol: string, payload: MarketUpdatePayload): void;
   getMetricChanges(symbol: string, timeIntervalMinutes: number): IMetricChanges | null;
+  getMetricChangesForWindow(symbol: string, startTime: number, endTime: number): IMetricChanges | null;
   getAllKnownSymbols(): string[];
   getHistoryLength(symbol: string): number;
   getCurrentPrice(symbol: string): number;

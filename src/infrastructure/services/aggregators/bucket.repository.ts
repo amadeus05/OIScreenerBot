@@ -142,4 +142,29 @@ export class BucketRepository {
         const removing = keys.length - limit;
         for (let i = 0; i < removing; i++) map.delete(keys[i]);
     }
+
+    public getBucketsInRange(
+        symbol: string,
+        from: number,
+        to: number,
+        resolution: '15s' | '1m'
+    ): { ts: number; bucket: import("./aggregator.types").Bucket }[] {
+        const store = this.getStore(resolution);
+        const map = store.get(symbol);
+
+        if (!map) return [];
+
+        const keys = map.getSortedKeys();
+        const result: { ts: number; bucket: import("./aggregator.types").Bucket }[] = [];
+
+        for (const ts of keys) {
+            if (ts >= from && ts <= to) {
+                const b = map.get(ts);
+                if (b) result.push({ ts, bucket: b });
+            }
+            if (ts > to) break;
+        }
+
+        return result;
+    }
 }

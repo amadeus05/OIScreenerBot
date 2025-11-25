@@ -62,6 +62,14 @@ export class MarketStateManager {
         return Array.from(this.lastUpdateTs.keys());
     }
 
+    public getOI(symbol: string): number | undefined {
+        return this.lastKnownOI.get(symbol);
+    }
+
+    public getPrice(symbol: string): number | undefined {
+        return this.lastKnownPrices.get(symbol);
+    }
+
     public getOutOfOrderStats(symbol?: string): Record<string, number> | number {
         if (symbol) return this.outOfOrderCount.get(symbol) ?? 0;
         return Object.fromEntries(this.outOfOrderCount);

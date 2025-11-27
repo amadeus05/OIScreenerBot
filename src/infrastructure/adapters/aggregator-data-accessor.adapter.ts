@@ -57,4 +57,10 @@ export class AggregatorDataAccessor implements MarketDataAccessor {
       }))
       .filter(p => p.value > 0);
   }
+
+  public getVolumeSeries(symbol: string, minutes: number): VolumePoint[] {
+    const now = Date.now();
+    const from = now - minutes * 60_000;
+    return this.aggregator.getVolumeSeriesInRange(symbol, from, now);
+  }
 }

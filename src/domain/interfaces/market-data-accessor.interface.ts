@@ -28,17 +28,20 @@ export interface MarketDataAccessor {
   /** Получить OI данные в указанном временном диапазоне */
   getOISeriesInRange(symbol: string, from: number, to: number): OIPoint[];
   
-  /** Опционально: получить цены (для комбо-фильтров) */
-  getPriceSeries?(symbol: string, minutes: number): { ts: number; value: number }[];
-  
   /** Текущее значение OI (быстрый доступ) */
   getCurrentOI(symbol: string): number | undefined;
-  
+
+  /** Опционально: получить цены (для комбо-фильтров) */
+  getPriceSeries?(symbol: string, minutes: number): { ts: number; value: number }[];
+   
   /** Текущее значение цены */
   getCurrentPrice(symbol: string): number | undefined;
 
   /** Получить объем данные в указанном временном диапазоне */
   getVolumeSeriesInRange(symbol: string, from: number, to: number): VolumePoint[];
+
+  /** Получить последние N минут закрывающих значений объема (1m resolution) */
+  getVolumeSeries(symbol: string, minutes: number): VolumePoint[];
 
   /** Получить текущее значение объема */
   getCurrentVolume(symbol: string): VolumeData | undefined;

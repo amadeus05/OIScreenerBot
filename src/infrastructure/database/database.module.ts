@@ -8,7 +8,7 @@ const logger = new Logger('DatabaseModule');
 
 export const AppDataSource = new DataSource({
   type: 'sqlite',
-  database: 'database.sqlite',
+  database: './data/database.sqlite',
   synchronize: true, // Для разработки. В продакшене лучше использовать миграции.
   logging: false,
   entities: [Trigger, Signal, SymbolMetadata],

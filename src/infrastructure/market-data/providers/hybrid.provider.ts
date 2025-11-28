@@ -11,6 +11,7 @@ import {
 
 const BINANCE_FUTURES_WS_URL = 'wss://fstream.binance.com/stream';
 const BINANCE_EXCHANGE_INFO_URL = 'https://fapi.binance.com/fapi/v1/exchangeInfo';
+const BINANCE_PREMIUM_INDEX_URL = 'https://fapi.binance.com/fapi/v1/premiumIndex';
 const BYBIT_FUTURES_WS_URL = 'wss://stream.bybit.com/v5/public/linear';
 const BYBIT_INSTRUMENTS_URL = 'https://api.bybit.com/v5/market/instruments-info';
 
@@ -74,6 +75,8 @@ export class HybridMarketDataProvider implements IMarketDataProvider {
 
     // Data merging
     private partialDataCache = new Map<string, PartialUpdate>();
+    // Funding rate cache (loaded at startup from Binance)
+    private fundingRateCache = new Map<string, number>();
 
     constructor(marketType: MarketType = 'futures') {
         this.marketType = marketType;
@@ -139,6 +142,9 @@ export class HybridMarketDataProvider implements IMarketDataProvider {
         this.logger.info(
             `✅ Found ${this.commonSymbols.size} common USDT perpetuals across both exchanges`
         );
+
+        // Load initial funding rates from Binance
+        await this.loadInitialFundingRates();
     }
 
     private async loadBinanceSymbols(): Promise<Set<string>> {
@@ -207,6 +213,53 @@ export class HybridMarketDataProvider implements IMarketDataProvider {
         if (!/^[A-Z]/.test(symbol)) return false; // Must start with letter
         if (!/^[A-Z0-9]+USDT$/.test(symbol)) return false; // Only alphanumeric + USDT
         return true;
+    }
+
+    private async loadInitialFundingRates(): Promise<void> {
+        this.logger.info('Loading initial funding rates from Binance...');
+
+        try {
+            let successCount = 0;
+            let failCount = 0;
+
+            // Binance premium index endpoint returns funding rate for all symbols
+            const res = await fetch(BINANCE_PREMIUM_INDEX_URL, {
+                headers: { 'User-Agent': 'HybridMarketDataProvider/1.0' },
+            });
+
+            if (!res.ok) {
+                this.logger.error(`Failed to fetch funding rates from Binance: ${res.status}`);
+                return;
+            }
+
+            const data: any = await res.json();
+
+            // Data is an array of objects with symbol and lastFundingRate
+            if (!Array.isArray(data)) {
+                this.logger.error('Unexpected response format from Binance premiumIndex');
+                return;
+            }
+
+            // Build map of funding rates for common symbols only
+            for (const item of data) {
+                if (this.commonSymbols.has(item.symbol)) {
+                    const fundingRate = item.lastFundingRate
+                        ? parseFloat(item.lastFundingRate)
+                        : undefined;
+
+                    if (fundingRate !== undefined && !isNaN(fundingRate)) {
+                        this.fundingRateCache.set(item.symbol, fundingRate);
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                }
+            }
+
+            this.logger.info(`✅ Loaded ${successCount} funding rates from Binance, ${failCount} failed/missing`);
+        } catch (error) {
+            this.logger.error('Error loading initial funding rates from Binance:', error);
+        }
     }
 
     // ==================== CONNECTION MANAGEMENT ====================
@@ -528,6 +581,11 @@ export class HybridMarketDataProvider implements IMarketDataProvider {
             fundingRate,
         };
 
+        // Update funding rate cache if present in tick
+        if (fundingRate !== undefined && !isNaN(fundingRate)) {
+            this.fundingRateCache.set(symbol, fundingRate);
+        }
+
         partial.lastUpdateTime = Date.now();
 
         // Try to emit merged update
@@ -579,7 +637,16 @@ export class HybridMarketDataProvider implements IMarketDataProvider {
             update.openInterest = partial.bybitData.openInterest;
             update.openInterestTimestamp = partial.bybitData.oiTimestamp;
             update.markPrice = partial.bybitData.markPrice;
-            update.fundingRate = partial.bybitData.fundingRate;
+
+            // Use funding rate from tick if present, otherwise use cached value from Binance
+            if (partial.bybitData.fundingRate !== undefined) {
+                update.fundingRate = partial.bybitData.fundingRate;
+            } else {
+                const cachedFundingRate = this.fundingRateCache.get(symbol);
+                if (cachedFundingRate !== undefined) {
+                    update.fundingRate = cachedFundingRate;
+                }
+            }
         }
 
         // Log first few merged updates

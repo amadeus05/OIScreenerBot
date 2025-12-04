@@ -29,7 +29,6 @@ export function registerDependencies(): void {
   // --- 1. Repositories (Data Access) ---
   container.bind('ITriggerRepository', () => new TriggerRepository());
   container.bind('ISignalRepository', () => new SignalRepository());
-  container.bind('ISymbolMetadataRepository', () => new SymbolMetadataRepository());
   container.bind('IMarketDataRepository', () => new MarketDataRepository());
 
   // --- 2. Market Data Infrastructure ---
@@ -37,7 +36,7 @@ export function registerDependencies(): void {
   // Инициализация провайдера (Binance Futures)
   const binanceProvider = new BinanceMarketDataProvider('futures');
   gateway.registerProvider(binanceProvider);
-  
+
   container.bind('IMarketDataGateway', () => gateway);
 
   // --- 3. Domain Services (Logic) ---

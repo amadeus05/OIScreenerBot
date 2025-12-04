@@ -82,26 +82,64 @@ export class TelegramBotService {
   private formatSignalMessage(s: SignalDto, interval?: number): string {
     const formatPct = (v?: number) => v ? (v > 0 ? `+${v.toFixed(2)}%` : `${v.toFixed(2)}%`) : '0%';
     const formatUSD = (v?: number) => {
-      if (!v) return '0$';
-      if (v > 1000000) return `${(v / 1000000).toFixed(1)}M$`;
-      if (v > 1000) return `${(v / 1000).toFixed(1)}K$`;
-      return `${v.toFixed(0)}$`;
+      if (!v) return '$0';
+      if (Math.abs(v) >= 1000000) return `$${(v / 1000000).toFixed(2)}M`;
+      if (Math.abs(v) >= 1000) return `$${(v / 1000).toFixed(2)}K`;
+      return `$${v.toFixed(2)}`;
+    };
+    const formatVol = (v?: number) => {
+      if (!v) return '0';
+      if (v >= 1000000) return `${(v / 1000000).toFixed(2)}M`;
+      if (v >= 1000) return `${(v / 1000).toFixed(2)}K`;
+      return v.toFixed(2);
     };
 
-    const emoji = s.oiChangePercent > 0 ? '🟢' : '🔴';
     const intervalText = interval ? `${interval}m` : '';
+    const time = s.timestamp ? s.timestamp.toLocaleTimeString('ru-RU') : '';
 
-    // CVD Color
+    // OI emoji and direction
+    const oiEmoji = s.oiChangePercent > 0 ? '🟢' : '🔴';
+    const oiArrow = s.oiChangePercent > 0 ? '↗️' : '↘️';
+
+    // Divergence: OI direction + Price direction determines sentiment
+    // OI↑ + Price↑ = Bulls (new longs)
+    // OI↑ + Price↓ = Bears (new shorts)  
+    // OI↓ + Price↑ = Bears (shorts covering)
+    // OI↓ + Price↓ = Bulls (longs exiting)
+    const oiUp = (s.oiChangePercent || 0) > 0;
+    const priceUp = (s.priceChangePercent || 0) > 0;
+    const isBullish = (oiUp && priceUp) || (!oiUp && !priceUp);
+    const divergence = Math.abs((s.oiChangePercent || 0) - (s.priceChangePercent || 0));
+    const divText = isBullish ? 'быки' : 'медведи';
+    const divEmoji = isBullish ? '🔺' : '🔻';
+
+    // Volume ratio
+    const volRatio = (s.previousVolume && s.previousVolume > 0)
+      ? (s.totalVolume || 0) / s.previousVolume
+      : 0;
+
+    // CVD direction
     const cvd = s.cvdDelta || 0;
+    const cvdEmoji = cvd >= 0 ? '🟢' : '🔴';
+    const cvdText = cvd >= 0 ? 'покупки' : 'продажи';
+
+    // Volume in USD (rough estimate using current price)
+    const volUSD = (s.totalVolume || 0) * (s.currentPrice || 0);
+    const prevVolUSD = (s.previousVolume || 0) * (s.previousPrice || s.currentPrice || 0);
 
     return `
-🚨 <b>${s.symbol}</b> ${intervalText} ${emoji}
-OI Change: <b>${formatPct(s.oiChangePercent)}</b>
-Price: ${s.currentPrice?.toFixed(4)} (${formatPct(s.priceChangePercent)})
+🔔 <b>№${s.signalNumber}</b> · ${s.symbol} · ${intervalText}
+💰 $${s.currentPrice?.toFixed(4) || '0'} (${formatPct(s.priceChangePercent)}) · ⏰ ${time}
 
-📊 <b>Metrics:</b>
-CVD Delta: ${formatUSD(cvd)}
-Liquidations: 🟢 ${formatUSD(s.liqLong)} | 🔴 ${formatUSD(s.liqShort)}
+━━━━━━━━━━━━━━━━
+${oiEmoji} <b>Open Interest:</b> ${formatPct(s.oiChangePercent)} ${oiArrow}
+${divEmoji} Дивергенция: ${divergence.toFixed(1)}% (${divText})
+
+📊 <b>Volume:</b> ${formatVol(s.totalVolume)} (${formatUSD(volUSD)})
+   ├ Ratio: ${volRatio > 1 ? '🚀' : '📉'} ${volRatio.toFixed(2)}x vs prev ${formatUSD(prevVolUSD)}
+   └ Delta: ${cvdEmoji} ${formatUSD(cvd)} (${cvdText})
+
+💥 <b>Liquidations:</b> 🟢 ${formatUSD(s.liqLong)} | 🔴 ${formatUSD(s.liqShort)}
 
 <a href="https://www.binance.com/ru/futures/${s.symbol}">Binance</a> | <a href="https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P">TradingView</a>
 `.trim();

@@ -8,7 +8,8 @@ export class SignalDto {
     public readonly oiEnd?: number,
 
     public readonly totalVolume?: number,
-    
+    public readonly previousVolume?: number,
+
     // New Metrics
     public readonly cvdDelta?: number,
     public readonly liqLong?: number,
@@ -20,5 +21,5 @@ export class SignalDto {
 
     public readonly timestamp?: Date,
     public readonly triggerIntervalMinutes?: number,
-  ) {}
+  ) { }
 }

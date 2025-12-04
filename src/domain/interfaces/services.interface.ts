@@ -10,11 +10,10 @@ export interface IAnalysisResult {
   oiEnd: number;
 
   // --- Динамический анализ (Rolling Window) ---
-  // Эти поля нужны для фиксации движения внутри окна, даже если к концу оно откатилось
-  maxRunupPercent: number;      // Максимальный рост от дна (Low -> Current)
-  maxDrawdownPercent: number;   // Максимальное падение от пика (High -> Current)
-  lowestOI: number;             // Минимум OI за период
-  highestOI: number;            // Максимум OI за период
+  maxRunupPercent: number;
+  maxDrawdownPercent: number;
+  lowestOI: number;
+  highestOI: number;
 
   // --- Цена ---
   priceChangePercent: number;
@@ -23,6 +22,7 @@ export interface IAnalysisResult {
 
   // --- Объем и Поток ---
   totalVolume: number;
+  previousVolume: number;
   cvdDelta: number;
 
   // Объект с ликвидациями

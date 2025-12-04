@@ -87,6 +87,7 @@ export class TechnicalAnalysisService implements ITechnicalAnalysisService {
       currentPrice: priceEnd,
       previousPrice: priceStart,
       totalVolume,
+      previousVolume: startCandle.ohlc.v,
       cvdDelta,
       liquidations: {
         long: liqLong,

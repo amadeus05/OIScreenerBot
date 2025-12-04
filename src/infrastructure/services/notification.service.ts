@@ -13,7 +13,7 @@ export class NotificationService implements INotificationService {
   constructor(
     private readonly signalHandler: SignalHandler,
     @Inject('ISignalRepository') private readonly signalRepository: ISignalRepository,
-  ) {}
+  ) { }
 
   public async processTrigger(trigger: Trigger, result: IAnalysisResult): Promise<void> {
     const signalDto = new SignalDto(
@@ -23,6 +23,7 @@ export class NotificationService implements INotificationService {
       result.oiStart,
       result.oiEnd,
       result.totalVolume,
+      result.previousVolume,
       result.cvdDelta,
       result.liquidations.long,
       result.liquidations.short,

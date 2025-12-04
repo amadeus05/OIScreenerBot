@@ -25,38 +25,9 @@ const HTTP_TIMEOUT = 2000;
 
 // Список пар с принудительно низким приоритетом
 const LOW_PRIORITY_SYMBOLS = new Set([
-  // Tier-1: ультра-ликвидные, OI меняется плавно, все знают
-  'BTCUSDT',
-  'ETHUSDT',
-  'SOLUSDT',
-  'BNBUSDT',
-  'XRPUSDT',
-  'DOGEUSDT',
-  'ADAUSDT',
-  'TRXUSDT',
-  'LINKUSDT',
-  'AVAXUSDT',
-  // Tier-2: высоколиквидные альты, OI почти не даёт сигнала
-  'MATICUSDT', // теперь POL
-  'DOTUSDT',
-  'LTCUSDT',
-  'BCHUSDT',
-  'NEARUSDT',
-  'APTUSDT',
-  'ARBUSDT',
-  'OPUSDT',
-  'SUIUSDT',
-  'TONUSDT',
-  // Мем-коины с огромным OI, но хаотичным поведением
-  'SHIBUSDT',
-  'PEPEUSDT',
-  'FLOKIUSDT',
-  'BONKUSDT',
-  'WIFUSDT',
-  // Стаблкоины и кросс-пары — OI не нужен вообще
-  'USDCUSDT',
-  'BUSDUSDT',
-  'EURUSDT',
+  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
+  'TRXUSDT', 'LINKUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT', 'LTCUSDT',
+  'USDCUSDT', 'BUSDUSDT', 'EURUSDT'
 ]);
 
 interface SymbolState {
@@ -128,10 +99,9 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
   }
 
   private async loadSymbols(): Promise<void> {
-    const url =
-      this.marketType === 'futures'
-        ? BINANCE_FUTURES_EXCHANGE_INFO_URL
-        : BINANCE_SPOT_EXCHANGE_INFO_URL;
+    const url = this.marketType === 'futures'
+      ? BINANCE_FUTURES_EXCHANGE_INFO_URL
+      : BINANCE_SPOT_EXCHANGE_INFO_URL;
 
     const res = await this.axiosInstance.get(url);
     const data = res.data;
@@ -141,13 +111,8 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     this.priorityMap.clear();
 
     for (const s of data.symbols || []) {
-      const isUsdtFutures =
-        this.marketType === 'futures' &&
-        s.contractType === 'PERPETUAL' &&
-        s.marginAsset === 'USDT' &&
-        s.status === 'TRADING';
-      const isSpotUsdt =
-        this.marketType === 'spot' && s.status === 'TRADING' && s.symbol.endsWith('USDT');
+      const isUsdtFutures = this.marketType === 'futures' && s.contractType === 'PERPETUAL' && s.marginAsset === 'USDT' && s.status === 'TRADING';
+      const isSpotUsdt = this.marketType === 'spot' && s.status === 'TRADING' && s.symbol.endsWith('USDT');
 
       if (isUsdtFutures || isSpotUsdt) {
         this.symbols.add(s.symbol);
@@ -158,12 +123,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
           fundingRate: 0,
           openInterest: 0,
           lastPrice: 0,
-          accLiqLong: 0,
-          accLiqShort: 0,
-          countLiqLong: 0,
-          countLiqShort: 0,
-          maxLiqLong: 0,
-          maxLiqShort: 0,
+          accLiqLong: 0, accLiqShort: 0, countLiqLong: 0, countLiqShort: 0, maxLiqLong: 0, maxLiqShort: 0,
         });
         const initialPriority = LOW_PRIORITY_SYMBOLS.has(s.symbol) ? 1 : 5;
         this.priorityMap.set(s.symbol, { priority: initialPriority, lastUpdated: 0 });
@@ -188,11 +148,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     this.connected = false;
     this.isPollingOI = false;
     this.reconnectTimers.forEach((t) => clearTimeout(t));
-    this.wsList.forEach((ws) => {
-      try {
-        ws.terminate();
-      } catch {}
-    });
+    this.wsList.forEach((ws) => { try { ws.terminate(); } catch { } });
     this.wsList = [];
     if (this.tickerWs) this.tickerWs.terminate();
     this.logger.info('Disconnected');
@@ -200,17 +156,14 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
 
   // --- WEBSOCKETS ---
   private createBatchWS(batch: string[]): WebSocket {
-    const streams = batch
-      .map((s) => {
-        const sym = s.toLowerCase();
-        let str = `${sym}@kline_${KLINE_INTERVAL}`;
-        if (this.marketType === 'futures') str += `/${sym}@markPrice/${sym}@forceOrder`;
-        return str;
-      })
-      .join('/');
+    const streams = batch.map((s) => {
+      const sym = s.toLowerCase();
+      let str = `${sym}@kline_${KLINE_INTERVAL}`;
+      if (this.marketType === 'futures') str += `/${sym}@markPrice/${sym}@forceOrder`;
+      return str;
+    }).join('/');
 
-    const baseUrl =
-      this.marketType === 'futures' ? BINANCE_FUTURES_STREAM_BASE : BINANCE_SPOT_STREAM_BASE;
+    const baseUrl = this.marketType === 'futures' ? BINANCE_FUTURES_STREAM_BASE : BINANCE_SPOT_STREAM_BASE;
     const ws = new WebSocket(`${baseUrl}?streams=${streams}`);
     let closedByUs = false;
 
@@ -226,12 +179,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       this.reconnectTimers.add(timer);
     });
     // @ts-ignore
-    ws._closeGracefully = () => {
-      closedByUs = true;
-      try {
-        ws.terminate();
-      } catch {}
-    };
+    ws._closeGracefully = () => { closedByUs = true; try { ws.terminate(); } catch { } };
     return ws;
   }
 
@@ -250,9 +198,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       if (msg.stream.includes('kline')) this.processKline(msg.data);
       else if (msg.stream.includes('markPrice')) this.processMarkPrice(msg.data);
       else if (msg.stream.includes('forceOrder')) this.processLiquidation(msg.data);
-    } catch (e) {
-      this.errorCount++;
-    }
+    } catch (e) { this.errorCount++; }
   }
 
   // --- PROCESSING ---
@@ -265,7 +211,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     const close = parseFloat(k.c);
     const vol = parseFloat(k.v);
     const takerBuy = parseFloat(k.V);
-    const deltaBase = takerBuy * 2 - vol;
+    const deltaBase = (takerBuy * 2) - vol;
     const avgPrice = (parseFloat(k.o) + parseFloat(k.h) + parseFloat(k.l) + close) / 4;
     const deltaUSD = deltaBase * avgPrice;
 
@@ -296,17 +242,14 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
         liqCountShort: state.countLiqShort,
         liqMaxLong: state.maxLiqLong,
         liqMaxShort: state.maxLiqShort,
-      },
+      }
     });
 
     if (isClosed) {
       state.cumulativeCVD += deltaUSD;
-      state.accLiqLong = 0;
-      state.accLiqShort = 0;
-      state.countLiqLong = 0;
-      state.countLiqShort = 0;
-      state.maxLiqLong = 0;
-      state.maxLiqShort = 0;
+      state.accLiqLong = 0; state.accLiqShort = 0;
+      state.countLiqLong = 0; state.countLiqShort = 0;
+      state.maxLiqLong = 0; state.maxLiqShort = 0;
       state.lastCandleTimestamp = candleTimestamp;
     }
     this.lastUpdateTime = Date.now();
@@ -349,11 +292,9 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       timestamp: payload.timestamp,
       isCandleClosed: payload.isClosed,
       ohlc: payload.ohlc,
-      indicators: payload.indicators,
+      indicators: payload.indicators
     };
-    try {
-      if (this.callback) this.callback(update);
-    } catch {}
+    try { if (this.callback) this.callback(update); } catch { }
   }
 
   // --- OI POLLING & PRIORITY ---
@@ -369,13 +310,11 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
           const change = Math.abs(parseFloat(t.P));
           const vol = parseFloat(t.q);
           const p = this.priorityMap.get(sym);
-          if (p) p.priority = change > 3 || vol > 50_000_000 ? 10 : 5;
+          if (p) p.priority = (change > 3 || vol > 50_000_000) ? 10 : 5;
         }
-      } catch {}
+      } catch { }
     });
-    this.tickerWs.on('close', () =>
-      setTimeout(() => this.connected && this.startAllTickersStream(), 5000),
-    );
+    this.tickerWs.on('close', () => setTimeout(() => this.connected && this.startAllTickersStream(), 5000));
   }
 
   private async startSmartOIPolling() {
@@ -413,7 +352,9 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
         if (state) {
           const prevOI = state.openInterest || val;
           state.openInterest = val;
-          if (Math.abs(val - prevOI) / prevOI > 0.001 && state.lastCandleTimestamp > 0) {
+
+          // Поднят порог до 0.5% (было 0.1%), чтобы снизить шум
+          if (Math.abs(val - prevOI) / prevOI > 0.005 && state.lastCandleTimestamp > 0) {
             const currentCandleTS = Math.floor(Date.now() / 60000) * 60000;
             this.emitUpdate(state, {
               price: state.lastPrice,
@@ -431,27 +372,21 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
                 liqCountShort: state.countLiqShort,
                 liqMaxLong: state.maxLiqLong,
                 liqMaxShort: state.maxLiqShort,
-              },
+              }
             });
           }
         }
         const p = this.priorityMap.get(symbol);
         if (p) p.lastUpdated = Date.now();
       }
-    } catch {}
+    } catch { }
   }
 
-  public async subscribe(symbols: string[]): Promise<void> {}
-  public async unsubscribe(symbols: string[]): Promise<void> {}
-  public async getAvailableSymbols(): Promise<string[]> {
-    return Array.from(this.symbols);
-  }
-  public onPriceUpdate(callback: PriceUpdateCallback): void {
-    this.callback = callback;
-  }
-  public isConnected(): boolean {
-    return this.connected;
-  }
+  public async subscribe(symbols: string[]): Promise<void> { }
+  public async unsubscribe(symbols: string[]): Promise<void> { }
+  public async getAvailableSymbols(): Promise<string[]> { return Array.from(this.symbols); }
+  public onPriceUpdate(callback: PriceUpdateCallback): void { this.callback = callback; }
+  public isConnected(): boolean { return this.connected; }
   public getHealthStatus(): ProviderHealthStatus {
     return {
       providerId: this.providerId,

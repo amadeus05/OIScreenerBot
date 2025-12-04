@@ -1,26 +1,31 @@
 import { Trigger } from '../entities/trigger.entity';
 import { SmartCandle, MarketData } from './market-data.interface';
 
-/**
- * Результат работы TechnicalAnalysisService.
- */
 export interface IAnalysisResult {
   symbol: string;
-  
-  // Анализ OI
+
+  // --- Классический анализ (Start vs End) ---
   oiChangePercent: number;
   oiStart: number;
   oiEnd: number;
 
-  // Анализ цены
+  // --- Динамический анализ (Rolling Window) ---
+  // Эти поля нужны для фиксации движения внутри окна, даже если к концу оно откатилось
+  maxRunupPercent: number;      // Максимальный рост от дна (Low -> Current)
+  maxDrawdownPercent: number;   // Максимальное падение от пика (High -> Current)
+  lowestOI: number;             // Минимум OI за период
+  highestOI: number;            // Максимум OI за период
+
+  // --- Цена ---
   priceChangePercent: number;
   currentPrice: number;
   previousPrice: number;
 
-  // Анализ объемов и потока
+  // --- Объем и Поток ---
   totalVolume: number;
-  cvdDelta: number; 
-  
+  cvdDelta: number;
+
+  // Объект с ликвидациями
   liquidations: {
     long: number;
     short: number;

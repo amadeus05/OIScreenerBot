@@ -2,25 +2,25 @@ import { Injectable } from '../../shared/decorators';
 import { IMarketDataRepository, ITriggerEngineService } from '../../domain/interfaces/services.interface';
 import { MarketData, SmartCandle } from '../../domain/interfaces/market-data.interface';
 
-// Внутренний буфер для одной пары
 class SymbolBuffer {
   public candles: SmartCandle[] = [];
   public lastPrice: number = 0;
   private readonly LIMIT = 1000;
-  
-  // Буфер для OI, пришедшего раньше свечи
-  private pendingIndicators = new Map<number, Partial<any>>();
+
+  private pendingUpdates = new Map<number, Partial<any>>();
 
   public update(data: MarketData) {
     if (data.price) this.lastPrice = data.price;
-    const incoming = data.indicators;
+    const ind = data.indicators;
 
-    // A. Пришла полная свеча (Kline)
+    // --- СЦЕНАРИЙ 1: Полные данные свечи (OHLC + Индикаторы) ---
     if (data.ohlc) {
-      const pending = this.pendingIndicators.get(data.timestamp) || {};
-      
-      const liqLong = incoming?.liquidationsLong ?? pending.liqLong ?? 0;
-      const liqShort = incoming?.liquidationsShort ?? pending.liqShort ?? 0;
+      const pending = this.pendingUpdates.get(data.timestamp) || {};
+
+      // Мы не читаем ликвидации из pending, так как OI-поллинг их не сохраняет.
+      // Берем только текущие входящие данные.
+      const liqLong = ind?.liquidationsLong ?? 0;
+      const liqShort = ind?.liquidationsShort ?? 0;
 
       const newCandle: SmartCandle = {
         ts: data.timestamp,
@@ -32,47 +32,49 @@ class SymbolBuffer {
           v: data.ohlc.volume,
         },
         futures: {
-          oi: incoming?.openInterest ?? pending.oi ?? this.getLast()?.futures.oi ?? 0,
-          funding: incoming?.fundingRate ?? pending.funding ?? this.getLast()?.futures.funding ?? 0,
+          // OI и Funding могут быть в pending
+          oi: ind?.openInterest ?? pending.oi ?? this.getLast()?.futures.oi ?? 0,
+          funding: ind?.fundingRate ?? pending.funding ?? this.getLast()?.futures.funding ?? 0,
         },
         orderFlow: {
-          cvd: incoming?.cvd ?? pending.cvd ?? this.getLast()?.orderFlow.cvd ?? 0,
-          delta: incoming?.candleDelta ?? pending.delta ?? 0,
+          cvd: ind?.cvd ?? pending.cvd ?? this.getLast()?.orderFlow.cvd ?? 0,
+          delta: ind?.candleDelta ?? pending.delta ?? 0,
           liquidations: {
             long: liqLong,
             short: liqShort,
-            maxLong: Math.max(incoming?.liqMaxLong ?? 0, pending.liqMaxLong ?? 0, liqLong),
-            maxShort: Math.max(incoming?.liqMaxShort ?? 0, pending.liqMaxShort ?? 0, liqShort),
+            countLong: ind?.liqCountLong ?? 0,
+            countShort: ind?.liqCountShort ?? 0,
+            maxLong: Math.max(ind?.liqMaxLong ?? 0, liqLong),
+            maxShort: Math.max(ind?.liqMaxShort ?? 0, liqShort),
           }
         }
       };
 
       const last = this.getLast();
       if (last && last.ts === newCandle.ts) {
-        // Обновляем текущую (Live) свечу (Overwrite)
         Object.assign(last, newCandle);
       } else {
-        // Новая свеча
         this.candles.push(newCandle);
         if (this.candles.length > this.LIMIT) this.candles.shift();
         this.cleanupPending(newCandle.ts);
       }
-      this.pendingIndicators.delete(data.timestamp);
-    } 
-    // B. Пришли только индикаторы (Smart Polling)
-    else if (incoming) {
+      this.pendingUpdates.delete(data.timestamp);
+    }
+    // --- СЦЕНАРИЙ 2: Только индикаторы (OI Polling) ---
+    else if (ind) {
       const last = this.getLast();
+
       if (last && last.ts === data.timestamp) {
-        // Обновляем Live
-        if (incoming.openInterest) last.futures.oi = incoming.openInterest;
-        if (incoming.fundingRate) last.futures.funding = incoming.fundingRate;
-      } else if (data.timestamp > (last?.ts || 0)) {
-        // Будущее - в Pending
-        const existing = this.pendingIndicators.get(data.timestamp) || {};
-        this.pendingIndicators.set(data.timestamp, {
+        if (ind.openInterest) last.futures.oi = ind.openInterest;
+        if (ind.fundingRate) last.futures.funding = ind.fundingRate;
+      }
+      else if (data.timestamp > (last?.ts || 0)) {
+        // Сохраняем только OI и Funding, так как они имеют смысл как Snapshot
+        const existing = this.pendingUpdates.get(data.timestamp) || {};
+        this.pendingUpdates.set(data.timestamp, {
           ...existing,
-          oi: incoming.openInterest ?? existing.oi,
-          funding: incoming.fundingRate ?? existing.funding,
+          oi: ind.openInterest ?? existing.oi,
+          funding: ind.fundingRate ?? existing.funding,
         });
       }
     }
@@ -87,8 +89,8 @@ class SymbolBuffer {
   }
 
   private cleanupPending(currentTs: number) {
-    for (const ts of this.pendingIndicators.keys()) {
-      if (ts < currentTs) this.pendingIndicators.delete(ts);
+    for (const ts of this.pendingUpdates.keys()) {
+      if (ts < currentTs) this.pendingUpdates.delete(ts);
     }
   }
 }
@@ -106,7 +108,6 @@ export class MarketDataRepository implements IMarketDataRepository {
     }
     buffer.update(data);
 
-    // Уведомляем движок о новых данных (Real-time check)
     if (this.triggerEngine) {
       this.triggerEngine.onPriceUpdate(data.symbol, data.price);
     }

@@ -21,6 +21,7 @@ database.sqlite
 # Logs
 combined.log
 error.log
+/logs
 
 # Winston daily rotate audit files
 /*-audit.json

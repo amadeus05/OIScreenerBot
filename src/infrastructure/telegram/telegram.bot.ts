@@ -8,240 +8,56 @@ export class TelegramBotService {
   private bot: TelegramBot;
   private readonly logger = new Logger(TelegramBotService.name);
 
-  // Rate limiting for Telegram API (30 messages per second)
-  private readonly messageQueue = new Map<number, Array<{ message: string; timestamp: number }>>();
-  private readonly MAX_MESSAGES_PER_SECOND = 25;
-  private readonly RATE_LIMIT_WINDOW_MS = 1000;
-
-  // Detect market type from ENV for proper link generation
-  private readonly marketType: string;
-
   constructor(token: string) {
-    if (!token) {
-      throw new Error('Telegram Bot Token is not provided!');
-    }
+    if (!token) throw new Error('Token missing');
     this.bot = new TelegramBot(token, { polling: true });
-    this.setupErrorHandling();
-
-    // Detect primary market type from configuration
-    this.marketType = this.detectMarketType();
-    this.logger.info(`Telegram links configured for: ${this.marketType}`);
-
-    // Cleanup old queue entries every minute
-    setInterval(() => this.cleanupQueues(), 60_000);
   }
 
-  public getBot(): TelegramBot {
-    return this.bot;
-  }
+  public getBot(): TelegramBot { return this.bot; }
 
   public async sendMessage(chatId: number, message: string): Promise<void> {
     try {
-      // Check rate limit
-      if (!(await this.checkRateLimit(chatId))) {
-        this.logger.warn(`Rate limit exceeded for chat ${chatId}, message queued`);
-        await this.delay(1000);
-      }
-
-      await this.bot.sendMessage(chatId, message, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      });
-
-      // Track message
-      this.trackMessage(chatId);
-    } catch (error) {
-      this.logger.error(`Failed to send Telegram message to chat ${chatId}:`, error);
+      await this.bot.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true });
+    } catch (e) {
+      this.logger.error('Send error', e);
     }
   }
 
-  public async sendSignal(
-    chatId: number,
-    signal: SignalDto,
-    triggerIntervalMinutes?: number,
-  ): Promise<void> {
-    const message = this.formatSignalMessage(signal, triggerIntervalMinutes);
-    await this.sendMessage(chatId, message);
+  public async sendSignal(chatId: number, signal: SignalDto, interval?: number): Promise<void> {
+    const msg = this.formatSignalMessage(signal, interval);
+    await this.sendMessage(chatId, msg);
   }
 
-  private formatSignalMessage(signal: SignalDto, triggerIntervalMinutes?: number): string {
-    const formatPercentWithEmoji = (value: number | undefined): string => {
-      if (value === undefined || value === null || !Number.isFinite(value)) return '—';
-      const rounded = value >= 0 ? `+${value.toFixed(2)}%` : `${value.toFixed(2)}%`;
-      const emoji = value > 0 ? '🟢' : value < 0 ? '🔴' : '⚪';
-      return `${emoji}${rounded}`;
+  private formatSignalMessage(s: SignalDto, interval?: number): string {
+    const formatPct = (v?: number) => v ? (v > 0 ? `+${v.toFixed(2)}%` : `${v.toFixed(2)}%`) : '0%';
+    const formatUSD = (v?: number) => {
+        if (!v) return '0$';
+        if (v > 1000000) return `${(v/1000000).toFixed(1)}M$`;
+        if (v > 1000) return `${(v/1000).toFixed(1)}K$`;
+        return `${v.toFixed(0)}$`;
     };
 
-    const formatDelta = (oi: number | undefined, price: number | undefined): string => {
-      if (!Number.isFinite(oi as number)) return '—';
-      const p = Number.isFinite(price as number) ? price as number : 0;
-      const delta = oi! - p; //TODO
-      const sign = delta >= 0 ? '+' : '';
-      const emoji = delta > 0 ? '🔺' : delta < 0 ? '🔻' : '⚪';
-      return `${emoji}${sign}${delta.toFixed(2)}%`;
-    };
+    const emoji = s.oiChangePercent > 0 ? '🟢' : '🔴';
+    const intervalText = interval ? `${interval}m` : '';
 
-    const formatVolume = (v?: number): string => {
-      if (!v || !Number.isFinite(v)) return '—';
-      // nice human readable: K/M
-      if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
-      if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
-      return v.toString();
-    };
-
-    const timeStr = (signal.timestamp ?? new Date()).toLocaleTimeString('ru-RU', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-
-    const intervalDisplay = triggerIntervalMinutes ? `${triggerIntervalMinutes}m` : '';
-
-    const binanceLink = this.generateBinanceLink(signal.symbol);
-    const tradingViewLink = this.generateTradingViewLink(signal.symbol);
-
-    const oiText = formatPercentWithEmoji(signal.oiChangePercent);
-    const priceText = formatPercentWithEmoji(signal.priceChangePercent ?? undefined);
-    const deltaText = formatDelta(signal.oiChangePercent, signal.priceChangePercent);
-
-    const totalVolText = formatVolume(signal.totalVolume);
-    const deltaVolText = signal.deltaVolume ? formatVolume(signal.deltaVolume) : '—';
-
-    // Price display
-    const priceStr = this.formatPrice(signal.currentPrice ?? 0);
+    // CVD Color
+    const cvd = s.cvdDelta || 0;
+    const cvdEmoji = cvd > 0 ? 'bull' : 'bear'; // Text placeholder or emoji
 
     return `
-🚨 №${signal.signalNumber} - <a href="${binanceLink}">${signal.symbol}</a> ${intervalDisplay}
-OI: ${oiText} | Price: ${priceText} | Δ: ${deltaText}
-📊 Vol: ${totalVolText} | ΔVol: ${deltaVolText}
-💵 ${priceStr} • ⏰ ${timeStr}
-<a href="${tradingViewLink}">Chart</a>
-    `.trim();
-  }
+🚨 <b>${s.symbol}</b> ${intervalText} ${emoji}
+OI Change: <b>${formatPct(s.oiChangePercent)}</b>
+Price: ${s.currentPrice?.toFixed(4)} (${formatPct(s.priceChangePercent)})
 
-  /**
-   * Smart price formatting based on value magnitude
-   */
-  private formatPrice(price: number): string {
-    if (!Number.isFinite(price)) return '—';
-    if (price >= 1000) {
-      return price.toFixed(2);
-    } else if (price >= 1) {
-      return price.toFixed(4);
-    } else if (price >= 0.01) {
-      return price.toFixed(4);
-    } else {
-      return price.toFixed(6);
-    }
-  }
+📊 <b>Metrics:</b>
+CVD Delta: ${formatUSD(cvd)}
+Liquidations: 🟢 ${formatUSD(s.liqLong)} | 🔴 ${formatUSD(s.liqShort)}
 
-  /**
-   * Generate Binance link based on market type
-   */
-  private generateBinanceLink(symbol: string): string {
-    if (this.marketType === 'futures') {
-      return `https://www.binance.com/ru/futures/${symbol}`;
-    }
-    return `https://www.binance.com/ru/trade/${symbol}`;
-  }
-
-  /**
-   * Generate TradingView link based on market type
-   */
-  private generateTradingViewLink(symbol: string): string {
-    if (this.marketType === 'futures') {
-      // Perpetual futures suffix
-      return `https://www.tradingview.com/chart/?symbol=BINANCE:${symbol}.P`;
-    }
-    return `https://www.tradingview.com/chart/?symbol=BINANCE:${symbol}`;
-  }
-
-  /**
-   * Detect primary market type from environment configuration
-   */
-  private detectMarketType(): string {
-    // Check inline format first
-    const providers = process.env.MARKET_DATA_PROVIDERS || '';
-    if (providers.includes(':')) {
-      const firstProvider = providers.split(',')[0];
-      const [, marketType] = firstProvider.split(':');
-      if (marketType) return marketType.toLowerCase();
-    }
-
-    // Check specific Binance config
-    const binanceMarketType = process.env.BINANCE_MARKET_TYPE?.toLowerCase();
-    if (binanceMarketType === 'spot' || binanceMarketType === 'futures') {
-      return binanceMarketType;
-    }
-
-    // Check global market type
-    const globalMarketType = process.env.MARKET_TYPE?.toLowerCase();
-    if (globalMarketType === 'spot' || globalMarketType === 'futures') {
-      return globalMarketType;
-    }
-
-    // Default to spot
-    return 'spot';
-  }
-
-  private async checkRateLimit(chatId: number): Promise<boolean> {
-    const now = Date.now();
-    const queue = this.messageQueue.get(chatId) || [];
-
-    // Remove messages outside the rate limit window
-    const recentMessages = queue.filter((msg) => now - msg.timestamp < this.RATE_LIMIT_WINDOW_MS);
-
-    if (recentMessages.length >= this.MAX_MESSAGES_PER_SECOND) {
-      return false;
-    }
-
-    this.messageQueue.set(chatId, recentMessages);
-    return true;
-  }
-
-  private trackMessage(chatId: number): void {
-    const queue = this.messageQueue.get(chatId) || [];
-    queue.push({ message: '', timestamp: Date.now() });
-    this.messageQueue.set(chatId, queue);
-  }
-
-  private cleanupQueues(): void {
-    const now = Date.now();
-    let cleaned = 0;
-
-    for (const [chatId, queue] of this.messageQueue.entries()) {
-      const recentMessages = queue.filter((msg) => now - msg.timestamp < this.RATE_LIMIT_WINDOW_MS);
-      
-      if (recentMessages.length === 0) {
-        this.messageQueue.delete(chatId);
-        cleaned++;
-      } else {
-        this.messageQueue.set(chatId, recentMessages);
-      }
-    }
-
-    if (cleaned > 0) {
-      this.logger.debug(`🧹 Cleaned ${cleaned} empty message queues`);
-    }
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private setupErrorHandling(): void {
-    this.bot.on('error', (error) => {
-      this.logger.error('Telegram Bot error:', error);
-    });
-
-    this.bot.on('polling_error', (error) => {
-      this.logger.error('Telegram Bot polling error:', error);
-    });
+<a href="https://www.binance.com/ru/futures/${s.symbol}">Binance</a> | <a href="https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P">TradingView</a>
+`.trim();
   }
 
   public async stop(): Promise<void> {
-    if (this.bot.isPolling()) {
       await this.bot.stopPolling();
-    }
   }
 }

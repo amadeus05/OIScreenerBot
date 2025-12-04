@@ -1,46 +1,52 @@
 import { Trigger } from '../entities/trigger.entity';
+import { SmartCandle, MarketData } from './market-data.interface';
 
-export interface IDataPoint {
-  readonly timestamp: number;
-  readonly price: number;
+/**
+ * Результат работы TechnicalAnalysisService.
+ */
+export interface IAnalysisResult {
+  symbol: string;
+  
+  // Анализ OI
+  oiChangePercent: number;
+  oiStart: number;
+  oiEnd: number;
+
+  // Анализ цены
+  priceChangePercent: number;
+  currentPrice: number;
+  previousPrice: number;
+
+  // Анализ объемов и потока
+  totalVolume: number;
+  cvdDelta: number; 
+  
+  liquidations: {
+    long: number;
+    short: number;
+  };
+
+  timeWindowSeconds: number;
 }
 
-export interface IMetricChanges {
-  // Primary (OI)
-  readonly oiChangePercent: number;
-  readonly oiStart?: number;
-  readonly oiEnd?: number;
-
-  // Volume metrics
-  readonly totalVolume?: number;
-  readonly deltaVolume?: number;
-
-  // Secondary (price)
-  readonly priceChangePercent?: number;
-  readonly currentPrice?: number;
-  readonly previousPrice?: number;
-
-  readonly timeWindowSeconds: number; // actual time window measured
-}
-
-export interface IDataAggregatorService {
-  // Backwards compatible: many providers still call updatePrice
-  updatePrice(symbol: string, price: number, timestamp: number): void;
-
-  // Implementations may provide more advanced API (e.g., updateMarketData),
-  // but trigger engine uses getMetricChanges which must return IMetricChanges.
-  getMetricChanges(symbol: string, timeIntervalMinutes: number): IMetricChanges | null;
-  getAllKnownSymbols(): string[];
-  getHistoryLength(symbol: string): number;
+export interface IMarketDataRepository {
+  updateMarketData(data: MarketData): void;
+  getHistory(symbol: string, limit: number): SmartCandle[];
+  getLastCandle(symbol: string): SmartCandle | undefined;
   getCurrentPrice(symbol: string): number;
+  getAllKnownSymbols(): string[];
+  isWarm(symbol: string): boolean;
   setTriggerEngine(engine: ITriggerEngineService): void;
+}
+
+export interface ITechnicalAnalysisService {
+  calculateChanges(candles: SmartCandle[], timeIntervalMinutes: number): IAnalysisResult | null;
 }
 
 export interface IMarketDataGateway {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  getActiveProviders?(): string[];
-  getProvidersHealth?(): Record<string, any>;
+  registerProvider(provider: any): void;
 }
 
 export interface ITriggerEngineService {
@@ -50,5 +56,5 @@ export interface ITriggerEngineService {
 }
 
 export interface INotificationService {
-  processTrigger(trigger: Trigger, symbol: string, metrics: IMetricChanges): Promise<void>;
+  processTrigger(trigger: Trigger, result: IAnalysisResult): Promise<void>;
 }

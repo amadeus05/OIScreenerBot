@@ -2,17 +2,13 @@ import { Inject, Injectable } from '../../shared/decorators';
 import { Logger } from '../../shared/logger';
 import {
   IMarketDataGateway,
-  IDataAggregatorService,
+  IMarketDataRepository,
 } from '../../domain/interfaces/services.interface';
 import {
   IMarketDataProvider,
-  PriceUpdateData,
 } from '../../domain/interfaces/market-data-provider.interface';
+import { MarketData } from '../../domain/interfaces/market-data.interface';
 
-/**
- * Composite Gateway that manages multiple market data providers
- * and aggregates data from all active sources
- */
 @Injectable()
 export class MarketDataGatewayService implements IMarketDataGateway {
   private readonly logger = new Logger('MarketDataGateway');
@@ -20,14 +16,13 @@ export class MarketDataGatewayService implements IMarketDataGateway {
   private isConnected = false;
 
   constructor(
-    @Inject('IDataAggregatorService')
-    private readonly dataAggregator: IDataAggregatorService,
+    // ⚠️ ВАЖНО: Мы теперь инжектим Репозиторий, а не Агрегатор
+    @Inject('IMarketDataRepository')
+    private readonly repository: IMarketDataRepository,
   ) {}
 
-  /**
-   * Register a market data provider
-   */
   public registerProvider(provider: IMarketDataProvider): void {
+    // Избегаем дубликатов
     if (this.providers.some((p) => p.providerId === provider.providerId)) {
       this.logger.warn(`Provider ${provider.providerId} already registered`);
       return;
@@ -35,106 +30,76 @@ export class MarketDataGatewayService implements IMarketDataGateway {
 
     this.providers.push(provider);
     
-    // Set up price update callback
-    provider.onPriceUpdate((data: PriceUpdateData) => {
-      this.handlePriceUpdate(data);
+    // Подписка на поток данных от провайдера
+    // Провайдер теперь присылает объект MarketData
+    provider.onPriceUpdate((data: MarketData) => {
+      this.handleMarketUpdate(data);
     });
 
     this.logger.info(`Registered provider: ${provider.providerId}`);
   }
 
-  /**
-   * Connect all registered providers
-   */
   public async connect(): Promise<void> {
-    if (this.isConnected) {
-      this.logger.warn('Gateway already connected');
+    if (this.isConnected) return;
+    if (this.providers.length === 0) {
+      // Это не критическая ошибка, просто варнинг, если запускаем без провайдеров
+      this.logger.warn('No providers registered to connect');
       return;
     }
 
-    if (this.providers.length === 0) {
-      throw new Error('No providers registered');
-    }
-
     this.logger.info(`Connecting ${this.providers.length} providers...`);
-
+    
     const results = await Promise.allSettled(
       this.providers.map((provider) => provider.connect())
     );
 
     const successful = results.filter((r) => r.status === 'fulfilled').length;
-    const failed = results.filter((r) => r.status === 'rejected').length;
-
-    if (successful === 0) {
+    
+    // Если хотя бы один подключился - считаем успех
+    if (successful > 0) {
+      this.isConnected = true;
+      this.logger.info(`Gateway connected: ${successful}/${this.providers.length} providers active`);
+      this.startHealthMonitoring();
+    } else {
+      this.logger.error('All providers failed to connect');
       throw new Error('All providers failed to connect');
     }
-
-    this.isConnected = true;
-    this.logger.info(
-      `Gateway connected: ${successful} successful, ${failed} failed`
-    );
-
-    // Start health monitoring
-    this.startHealthMonitoring();
   }
 
-  /**
-   * Disconnect all providers
-   */
   public async disconnect(): Promise<void> {
     if (!this.isConnected) return;
 
     this.logger.info('Disconnecting all providers...');
-
-    await Promise.allSettled(
-      this.providers.map((provider) => provider.disconnect())
-    );
-
+    await Promise.allSettled(this.providers.map((p) => p.disconnect()));
+    
     this.isConnected = false;
     this.stopHealthMonitoring();
     this.logger.info('Gateway disconnected');
   }
 
   /**
-   * Get list of active providers
+   * Центральный обработчик входящих данных
    */
-  public getActiveProviders(): string[] {
-    return this.providers
-      .filter((p) => p.isConnected())
-      .map((p) => p.providerId);
-  }
-
-  /**
-   * Get health status of all providers
-   */
-  public getProvidersHealth(): Record<string, any> {
-    const health: Record<string, any> = {};
-    
-    for (const provider of this.providers) {
-      health[provider.providerId] = provider.getHealthStatus();
-    }
-    
-    return health;
-  }
-
-  private handlePriceUpdate(data: PriceUpdateData): void {
+  private handleMarketUpdate(data: MarketData): void {
     try {
-      // Forward to data aggregator
-      this.dataAggregator.updatePrice(data.symbol, data.price, data.timestamp);
+      // ⚠️ ИСПРАВЛЕНИЕ: Вызываем updateMarketData у репозитория
+      this.repository.updateMarketData(data);
     } catch (error) {
-      this.logger.error(
-        `Error processing price update from ${data.providerId}:`,
-        error
-      );
+      this.logger.error(`Error processing update from ${data.providerId}:`, error);
     }
   }
+
+  // --- Health Check ---
 
   private healthMonitorTimer: NodeJS.Timeout | null = null;
 
   private startHealthMonitoring(): void {
-    // Log health status every 5 minutes
+    // Логируем состояние раз в 5 минут
     this.healthMonitorTimer = setInterval(() => {
-      this.logHealthStatus();
+        this.providers.forEach(p => {
+            const h = p.getHealthStatus();
+            this.logger.info(`[Health] ${h.providerId}: msgs=${h.messageCount} err=${h.errorCount} conn=${h.isConnected}`);
+        });
     }, 5 * 60 * 1000);
   }
 
@@ -142,25 +107,6 @@ export class MarketDataGatewayService implements IMarketDataGateway {
     if (this.healthMonitorTimer) {
       clearInterval(this.healthMonitorTimer);
       this.healthMonitorTimer = null;
-    }
-  }
-
-  private logHealthStatus(): void {
-    const health = this.getProvidersHealth();
-    const active = this.getActiveProviders();
-
-    this.logger.info(
-      `Gateway Health: ${active.length}/${this.providers.length} providers active`
-    );
-
-    for (const [providerId, status] of Object.entries(health)) {
-      const emoji = status.isConnected ? '✅' : '❌';
-      this.logger.info(
-        `${emoji} ${providerId}: ` +
-        `msgs=${status.messageCount} ` +
-        `errors=${status.errorCount} ` +
-        `reconnects=${status.reconnectAttempts}`
-      );
     }
   }
 }

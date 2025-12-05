@@ -21,7 +21,26 @@ import { SignalHandler } from './presentation/telegram/handlers/signal.handler';
 import { CreateTriggerUseCase } from './application/use-cases/create-trigger.use-case';
 import { GetTriggersUseCase } from './application/use-cases/get-triggers.use-case';
 import { RemoveTriggerUseCase } from './application/use-cases/remove-trigger.use-case';
+import { AnalyzeCoinUseCase } from './application/use-cases/analyze-coin.use-case';
 import { PumpScoutBot } from './app';
+
+// Coin Analyzer Module
+import { CoinAnalyzerCoordinator } from './domain/coin-analyzer/coin-analyzer.coordinator';
+import { MultiTimeframeService } from './domain/coin-analyzer/services/multi-timeframe.service';
+import { DirectionResolver } from './domain/coin-analyzer/services/direction-resolver.service';
+import { EntryTimingResolver } from './domain/coin-analyzer/services/entry-timing.service';
+import { StopLossCalculator } from './domain/coin-analyzer/services/stop-loss.service';
+import { ConfidenceScorer } from './domain/coin-analyzer/services/confidence-scorer.service';
+import {
+  MarketRegimeFilter,
+  BTCCorrelationFilter,
+  FundingExtremeFilter,
+  TrendAlignmentFilter,
+} from './domain/coin-analyzer/filters';
+import {
+  OIDivergenceStrategy,
+  LiquidationCascadeStrategy,
+} from './domain/coin-analyzer/strategies';
 
 export function registerDependencies(): void {
   const container = DIContainer.getInstance();
@@ -33,7 +52,6 @@ export function registerDependencies(): void {
 
   // --- 2. Market Data Infrastructure ---
   const gateway = new MarketDataGatewayService(container.get('IMarketDataRepository'));
-  // Инициализация провайдера (Binance Futures)
   const binanceProvider = new BinanceMarketDataProvider('futures');
   gateway.registerProvider(binanceProvider);
 
@@ -43,12 +61,50 @@ export function registerDependencies(): void {
   container.bind(UptimeService, () => new UptimeService());
   container.bind('ITechnicalAnalysisService', () => new TechnicalAnalysisService());
 
-  // --- 4. Presentation / Notification ---
+  // --- 4. Coin Analyzer Module ---
+  // Core services
+  container.bind('IMultiTimeframeService', () => new MultiTimeframeService(
+    container.get('IMarketDataRepository')
+  ));
+  container.bind('IDirectionResolver', () => new DirectionResolver());
+  container.bind('IEntryTimingResolver', () => new EntryTimingResolver());
+  container.bind('IStopLossCalculator', () => new StopLossCalculator());
+  container.bind('IConfidenceScorer', () => new ConfidenceScorer());
+
+  // Create coordinator and register filters/strategies
+  const coinAnalyzer = new CoinAnalyzerCoordinator(
+    container.get('IMarketDataRepository'),
+    container.get('IMultiTimeframeService'),
+    container.get('IDirectionResolver'),
+    container.get('IEntryTimingResolver'),
+    container.get('IStopLossCalculator'),
+    container.get('IConfidenceScorer'),
+  );
+
+  // Register filters
+  coinAnalyzer.registerFilter(new MarketRegimeFilter());
+  coinAnalyzer.registerFilter(new BTCCorrelationFilter());
+  coinAnalyzer.registerFilter(new FundingExtremeFilter());
+  coinAnalyzer.registerFilter(new TrendAlignmentFilter());
+
+  // Register strategies
+  coinAnalyzer.registerStrategy(new OIDivergenceStrategy());
+  coinAnalyzer.registerStrategy(new LiquidationCascadeStrategy());
+
+  container.bind('ICoinAnalyzer', () => coinAnalyzer);
+
+  // Analyze use case
+  container.bind('AnalyzeCoinUseCase', () => new AnalyzeCoinUseCase(
+    container.get('ICoinAnalyzer'),
+    container.get('IMarketDataRepository'),
+  ));
+
+  // --- 5. Presentation / Notification ---
   container.bind(TelegramBotService, () => new TelegramBotService(process.env.TELEGRAM_BOT_TOKEN || ''));
   container.bind(SignalHandler, () => new SignalHandler(container.get(TelegramBotService), container.get('ISignalRepository')));
   container.bind('INotificationService', () => new NotificationService(container.get(SignalHandler), container.get('ISignalRepository')));
 
-  // --- 5. Engine (Orchestrator) ---
+  // --- 6. Engine (Orchestrator) ---
   const engine = new TriggerEngineService(
     container.get('ITriggerRepository'),
     container.get('IMarketDataRepository'),
@@ -62,18 +118,19 @@ export function registerDependencies(): void {
   const repo = container.get('IMarketDataRepository') as MarketDataRepository;
   repo.setTriggerEngine(engine);
 
-  // --- 6. Use Cases ---
+  // --- 7. Use Cases ---
   container.bind(CreateTriggerUseCase, () => new CreateTriggerUseCase(container.get('ITriggerRepository')));
   container.bind(GetTriggersUseCase, () => new GetTriggersUseCase(container.get('ITriggerRepository')));
   container.bind(RemoveTriggerUseCase, () => new RemoveTriggerUseCase(container.get('ITriggerRepository')));
 
-  // --- 7. Application Entry ---
+  // --- 8. Application Entry ---
   container.bind(CommandHandler, () => new CommandHandler(
     container.get(TelegramBotService),
     container.get(CreateTriggerUseCase),
     container.get(GetTriggersUseCase),
     container.get(RemoveTriggerUseCase),
     container.get(UptimeService),
+    container.get('AnalyzeCoinUseCase'),
   ));
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(

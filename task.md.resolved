@@ -1,0 +1,71 @@
+# Coin Analyzer Module — Task Breakdown
+
+## Planning Phase
+- [x] Study existing project structure
+- [x] Analyze domain layer (interfaces, entities, types)
+- [x] Analyze application layer (use cases, DTOs)
+- [x] Analyze infrastructure layer (services, repositories)
+- [x] Analyze presentation layer (telegram handlers)
+- [x] Understand DI container patterns
+- [x] Create implementation plan
+- [x] **User approval of implementation plan**
+
+## Implementation Phase
+
+### Phase 1: Types and Interfaces
+- [x] Create [types.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/types.ts) with enums and type definitions
+- [x] Create [interfaces.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/interfaces.ts) with contracts for filters/strategies
+
+### Phase 2: Base Classes
+- [x] Create [base.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/base.filter.ts) abstract class
+- [x] Create [base.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/base.strategy.ts) abstract class
+
+### Phase 3: Core Services
+- [x] Implement [direction-resolver.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/direction-resolver.service.ts)
+- [x] Implement [entry-timing.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/entry-timing.service.ts)
+- [x] Implement [stop-loss.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/stop-loss.service.ts)
+- [x] Implement [confidence-scorer.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/confidence-scorer.service.ts)
+- [x] Implement [multi-timeframe.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/multi-timeframe.service.ts)
+
+### Phase 4: Filters
+- [x] Implement [market-regime.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/market-regime.filter.ts)
+- [x] Implement [btc-correlation.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/btc-correlation.filter.ts)
+- [x] Implement [funding-extreme.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/funding-extreme.filter.ts)
+- [x] Implement [trend-alignment.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/trend-alignment.filter.ts)
+
+### Phase 5: Strategies
+- [x] Implement [oi-divergence.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/oi-divergence.strategy.ts)
+- [x] Implement [liquidation-cascade.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/liquidation-cascade.strategy.ts)
+
+### Phase 6: Coordinator
+- [x] Implement [coin-analyzer.coordinator.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/coin-analyzer.coordinator.ts)
+
+### Phase 7: Persistence
+- [x] Create [analysis-result.entity.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/entities/analysis-result.entity.ts)
+
+### Phase 8: Use Case + DTO
+- [x] Create [analyze-coin.use-case.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/application/use-cases/analyze-coin.use-case.ts)
+- [x] Create [coin-analysis.dto.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/application/dto/coin-analysis.dto.ts)
+
+### Phase 9: Telegram Integration
+- [x] Add `/analyze` command to [command.handler.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/presentation/telegram/handlers/command.handler.ts)
+- [x] Implement analysis result formatting
+
+### Phase 10: DI Registration
+- [x] Register all new services in [app.container.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/app.container.ts)
+
+### Phase 11: Weight Adaptation (V1.1)
+- [ ] Implement `weight-adaptation.service.ts`
+- [ ] Add daily cron job trigger
+
+### Phase 12: Tests
+- [ ] Unit tests for filters
+- [ ] Unit tests for strategies
+- [ ] Unit tests for coordinator
+- [ ] Integration test for full flow
+
+## Verification Phase
+- [x] Verify module structure (all files created)
+- [ ] Run TypeScript compilation
+- [ ] Manual testing via Telegram
+- [ ] Create walkthrough document

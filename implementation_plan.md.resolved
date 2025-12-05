@@ -1,0 +1,538 @@
+# Coin Analyzer Module — Implementation Plan
+
+## Problem Description
+
+После получения сигнала от текущей системы триггеров, пользователь хочет иметь возможность выполнить **глубокий анализ** конкретной монеты через Telegram-команду. Это **полностью независимый функционал**, который не интегрируется в логику существующих триггеров и сигналов.
+
+### Ключевые требования
+
+| # | Требование | Описание |
+|---|------------|----------|
+| 1 | **Market Regime** | Проверка: стоит ли сейчас торговать (волатильность, корреляция с BTC и др.) |
+| 2 | **Direction** | Определение направления: Long или Short |
+| 3 | **Entry Timing** | Определение оптимального момента входа |
+| 4 | **Stop Loss** | Расчёт уровня Stop Loss |
+| 5 | **Filters** | Расширяемая система фильтров (plugin-based) |
+| 6 | **Strategies** | Расширяемая система стратегий |
+| 7 | **Confidence** | Процент уверенности в оценке |
+| 8 | **Auto-Adaptation** | Сохранение анализов + ежедневная авто-адаптация весов на основе ретроспективы |
+
+---
+
+## Proposed Architecture
+
+```mermaid
+graph TB
+    subgraph Presentation["Presentation Layer"]
+        TG["/analyze command"]
+    end
+
+    subgraph Application["Application Layer"]
+        UC[AnalyzeCoinUseCase]
+    end
+
+    subgraph Domain["Domain Layer (coin-analyzer module)"]
+        CA[CoinAnalyzer Coordinator]
+        
+        subgraph Filters["Filters (IAnalysisFilter)"]
+            F1[MarketRegimeFilter]
+            F2[BTCCorrelationFilter]
+            F3[VolumeProfileFilter]
+            F4[LiquidationClusterFilter]
+        end
+        
+        subgraph Strategies["Strategies (IEntryStrategy)"]
+            S1[OIDivergenceStrategy]
+            S2[LiquidationHuntStrategy]
+            S3[VolumeBreakoutStrategy]
+        end
+        
+        subgraph Core["Core Services"]
+            DM[DirectionResolver]
+            EM[EntryTimingResolver]
+            SL[StopLossCalculator]
+            SC[ConfidenceScorer]
+        end
+    end
+
+    subgraph Infrastructure["Infrastructure Layer"]
+        AR[AnalysisResultRepository]
+        WA[WeightAdaptationService]
+        MD[IMarketDataRepository]
+    end
+
+    TG --> UC
+    UC --> CA
+    CA --> Filters
+    CA --> Strategies
+    CA --> Core
+    CA --> AR
+    WA --> AR
+    Filters --> MD
+    Strategies --> MD
+```
+
+---
+
+## Design Decisions
+
+### 1. Почему отдельный модуль, а не расширение TriggerEngine?
+
+> **Принцип единственной ответственности (SRP)**  
+> TriggerEngine отвечает за real-time мониторинг и срабатывание триггеров. CoinAnalyzer — это on-demand deep analysis. Смешивание приведёт к:
+> - Усложнению тестирования
+> - Трудностям в расширении каждой системы независимо
+> - Нарушению cohesion
+
+### 2. Plugin-based Filters и Strategies — почему?
+
+> **Open/Closed Principle**  
+> Система должна быть открыта для расширения, но закрыта для модификации. Каждый фильтр/стратегия — отдельный класс, реализующий интерфейс:
+
+```typescript
+// Легко добавить новый фильтр без изменения координатора
+export interface IAnalysisFilter {
+  readonly name: string;
+  readonly weight: number;  // Адаптивный вес
+  
+  analyze(context: AnalysisContext): Promise<FilterResult>;
+}
+
+export interface IEntryStrategy {
+  readonly name: string;
+  readonly weight: number;
+  
+  evaluate(context: AnalysisContext): Promise<StrategyResult>;
+}
+```
+
+### 3. Weighted Scoring System — почему не просто "да/нет"?
+
+> **Гибкость и адаптивность**  
+> Каждый фильтр и стратегия возвращают:
+> - `score`: число от -1.0 (негатив) до +1.0 (позитив)
+> - `confidence`: уверенность в своей оценке (0-1)
+> - `reason`: человекочитаемое объяснение
+> 
+> Финальный результат = взвешенная сумма всех scores × confidence × weight.
+
+### 4. Auto-Adaptation — как это работает?
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Analyzer
+    participant DB as AnalysisResultRepository
+    participant Adaptor as WeightAdaptationService
+    participant Market as Market (Price Feed)
+
+    User->>Analyzer: /analyze BTCUSDT
+    Analyzer->>DB: Save analysis with prediction
+    
+    Note over DB: 24-48h later...
+    
+    Adaptor->>DB: Fetch analyses older than 24h
+    Adaptor->>Market: Get actual outcome
+    Adaptor->>Adaptor: Compare prediction vs reality
+    Adaptor->>DB: Update filter/strategy weights
+```
+
+**Ежедневный cron job:**
+1. Берёт анализы за последние 24-48 часов
+2. Сравнивает предсказанное направление с реальным движением цены
+3. Увеличивает веса фильтров/стратегий, которые были правы
+4. Уменьшает веса тех, кто ошибся
+5. Применяет exponential decay для плавности
+
+### 5. Почему TypeORM Entity для хранения анализов?
+
+> **Соответствие существующей архитектуре**  
+> Проект уже использует TypeORM для Trigger entity. Храним:
+> - Входные данные анализа
+> - Результат и confidence
+> - Предсказанное направление и цену
+> - Timestamp для ретроспективы
+> - Actual outcome (заполняется позже)
+
+---
+
+## Proposed Changes
+
+### Domain Layer — Новый модуль `coin-analyzer`
+
+#### [NEW] [types.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/types.ts)
+
+Типы и интерфейсы для модуля:
+- `AnalysisContext` — входные данные для анализа
+- `FilterResult` / `StrategyResult` — результаты компонентов
+- `CoinAnalysisResult` — итоговый результат
+- `TradeDirection` — enum (LONG/SHORT/NEUTRAL)
+
+#### [NEW] [interfaces.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/interfaces.ts)
+
+Интерфейсы:
+- `IAnalysisFilter` — контракт для фильтров
+- `IEntryStrategy` — контракт для стратегий
+- `ICoinAnalyzer` — главный оркестратор
+- `IWeightAdaptationService` — сервис авто-адаптации
+
+---
+
+### Domain Layer — Filters (расширяемые)
+
+#### [NEW] [market-regime.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/market-regime.filter.ts)
+
+Проверяет:
+- Волатильность (ATR relative to price)
+- Тренд vs Range (ADX-like calculation)
+- Время суток (избегаем Asian session low liquidity)
+
+#### [NEW] [btc-correlation.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/btc-correlation.filter.ts)
+
+Проверяет:
+- Корреляция монеты с BTC за последние N свечей
+- Если BTC падает, а альт растёт — повышенный риск
+
+#### [NEW] [funding-extreme.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/funding-extreme.filter.ts)
+
+Проверяет:
+- Funding rate > ±0.1% = crowded trade warning
+- Extreme funding = reversal probability
+
+#### [NEW] [trend-alignment.filter.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/filters/trend-alignment.filter.ts)
+
+**Multi-Timeframe Analysis (5m / 15m / 1h):**
+- Определение тренда на каждом TF (Higher Highs/Lower Lows)
+- Поиск ключевых уровней S/R на 1h
+- Проверка согласованности: все TF в одном направлении = сильный сигнал
+
+#### [NEW] [multi-timeframe.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/multi-timeframe.service.ts)
+
+Сервис агрегации 1m свечей:
+- `aggregateTo5m(candles)` — группировка в 5-минутки
+- `aggregateTo15m(candles)` — группировка в 15-минутки  
+- `aggregateTo1h(candles)` — группировка в часовые
+- `detectTrend(candles)` — определение направления тренда
+- `findKeyLevels(candles)` — поиск S/R уровней
+
+---
+
+### Domain Layer — Strategies (расширяемые)
+
+#### [NEW] [oi-divergence.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/oi-divergence.strategy.ts)
+
+Логика:
+- OI растёт + Price падает → Short squeeze potential
+- OI падает + Price растёт → Weak rally
+
+#### [NEW] [liquidation-hunt.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/liquidation-hunt.strategy.ts)
+
+Логика:
+- Кластер стопов определённой стороны → ожидаем hunt в эту сторону
+
+#### [NEW] [volume-breakout.strategy.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/strategies/volume-breakout.strategy.ts)
+
+Логика:
+- Volume spike + Price breakout → сильный сигнал продолжения
+
+---
+
+### Domain Layer — Core Services
+
+#### [NEW] [direction-resolver.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/direction-resolver.service.ts)
+
+Агрегирует scores от стратегий:
+- Positive sum → LONG
+- Negative sum → SHORT  
+- Near zero → NEUTRAL
+
+#### [NEW] [entry-timing.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/entry-timing.service.ts)
+
+Определяет Entry Timing:
+- `IMMEDIATE` — войти сейчас
+- `WAIT_PULLBACK` — дождаться отката X%
+- `WAIT_CONFIRMATION` — ждать пробоя уровня
+
+#### [NEW] [stop-loss.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/stop-loss.service.ts)
+
+Расчёт Stop Loss:
+- ATR-based (1.5-2x ATR от входа)
+- Swing Low/High based
+- Liquidation cluster based
+
+#### [NEW] [confidence-scorer.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/services/confidence-scorer.service.ts)
+
+Финальный confidence = weighted average:
+```
+sum(filter.score * filter.confidence * filter.weight) / sum(weights)
+```
+
+---
+
+### Domain Layer — Coordinator
+
+#### [NEW] [coin-analyzer.coordinator.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/coin-analyzer/coin-analyzer.coordinator.ts)
+
+Главный оркестратор:
+1. Собирает `AnalysisContext` из [IMarketDataRepository](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/interfaces/services.interface.ts#37-46)
+2. Параллельно запускает все filters
+3. Если filters пройдены → запускает strategies
+4. Агрегирует результаты через DirectionResolver, EntryTiming, StopLoss
+5. Рассчитывает confidence через ConfidenceScorer
+6. Сохраняет результат через `AnalysisResultRepository`
+
+---
+
+### Infrastructure Layer
+
+#### [NEW] [analysis-result.entity.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/domain/entities/analysis-result.entity.ts)
+
+TypeORM Entity:
+```typescript
+@Entity('analysis_results')
+export class AnalysisResult {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column() symbol: string;
+  @Column() direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  @Column('real') confidence: number;
+  @Column('real') entryPrice: number;
+  @Column('real') stopLoss: number;
+  @Column() entryTiming: string;
+  
+  // Для адаптации весов
+  @Column('json') filterScores: Record<string, number>;
+  @Column('json') strategyScores: Record<string, number>;
+  
+  // Ретроспектива
+  @Column('real', { nullable: true }) actualOutcomePercent: number;
+  @Column({ nullable: true }) wasCorrect: boolean;
+  
+  @CreateDateColumn() createdAt: Date;
+  @Column({ nullable: true }) evaluatedAt: Date;
+}
+```
+
+#### [NEW] [analysis-result.repository.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/infrastructure/repositories/analysis-result.repository.ts)
+
+Repository methods:
+- `save(result: AnalysisResult)`
+- `getUnevaluatedResults(olderThan: Date)`
+- `getWeightsByOutcome(days: number)`
+- `updateOutcome(id, actualPercent, wasCorrect)`
+
+#### [NEW] [weight-adaptation.service.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/infrastructure/services/weight-adaptation.service.ts)
+
+Cron-like service:
+- Запускается раз в день
+- Анализирует старые результаты
+- Обновляет веса фильтров/стратегий
+- Использует exponential moving average для весов
+
+---
+
+### Application Layer
+
+#### [NEW] [analyze-coin.use-case.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/application/use-cases/analyze-coin.use-case.ts)
+
+Use Case:
+```typescript
+export class AnalyzeCoinUseCase {
+  async execute(symbol: string): Promise<CoinAnalysisResult> {
+    // 1. Validate symbol exists in market data
+    // 2. Call CoinAnalyzer.analyze(symbol)
+    // 3. Return formatted result
+  }
+}
+```
+
+#### [NEW] [coin-analysis.dto.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/application/dto/coin-analysis.dto.ts)
+
+DTO для ответа:
+- symbol
+- direction
+- confidence
+- entryPrice
+- stopLoss
+- entryTiming
+- filterResults[]
+- strategyResults[]
+
+---
+
+### Presentation Layer
+
+#### [MODIFY] [command.handler.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/presentation/telegram/handlers/command.handler.ts)
+
+Добавить команду `/analyze`:
+```typescript
+this.bot.onText(/\/analyze\s+(\w+)/, this.handleAnalyze.bind(this));
+
+private async handleAnalyze(msg, match) {
+  const symbol = match[1].toUpperCase();
+  const result = await this.analyzeCoinUseCase.execute(symbol);
+  await this.sendAnalysisResult(chatId, result);
+}
+```
+
+---
+
+### DI Container
+
+#### [MODIFY] [app.container.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/app.container.ts)
+
+Регистрация новых сервисов:
+- All Filters
+- All Strategies
+- CoinAnalyzerCoordinator
+- AnalyzeCoinUseCase
+- WeightAdaptationService
+
+---
+
+## File Structure
+
+```
+src/
+├── domain/
+│   ├── coin-analyzer/
+│   │   ├── types.ts                    # Types and enums
+│   │   ├── interfaces.ts               # Contracts
+│   │   ├── coin-analyzer.coordinator.ts
+│   │   ├── filters/
+│   │   │   ├── index.ts                # Re-exports
+│   │   │   ├── base.filter.ts          # Abstract base
+│   │   │   ├── market-regime.filter.ts
+│   │   │   ├── btc-correlation.filter.ts
+│   │   │   ├── volume-profile.filter.ts
+│   │   │   └── liquidation-cluster.filter.ts
+│   │   ├── strategies/
+│   │   │   ├── index.ts
+│   │   │   ├── base.strategy.ts
+│   │   │   ├── oi-divergence.strategy.ts
+│   │   │   ├── liquidation-hunt.strategy.ts
+│   │   │   └── volume-breakout.strategy.ts
+│   │   └── services/
+│   │       ├── direction-resolver.service.ts
+│   │       ├── entry-timing.service.ts
+│   │       ├── stop-loss.service.ts
+│   │       └── confidence-scorer.service.ts
+│   └── entities/
+│       └── analysis-result.entity.ts
+├── infrastructure/
+│   ├── repositories/
+│   │   └── analysis-result.repository.ts
+│   └── services/
+│       └── weight-adaptation.service.ts
+├── application/
+│   ├── use-cases/
+│   │   └── analyze-coin.use-case.ts
+│   └── dto/
+│       └── coin-analysis.dto.ts
+└── presentation/
+    └── telegram/handlers/
+        └── command.handler.ts          # Modified
+```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+#### Unit Tests (Jest)
+
+```bash
+npm test -- --testPathPattern="coin-analyzer"
+```
+
+Создадим тесты:
+
+1. **Filter Tests** (`src/tests/coin-analyzer/filters/`)
+   - Каждый фильтр тестируется изолированно с mock данными
+   - Проверяем edge cases (пустые данные, нулевые значения)
+
+2. **Strategy Tests** (`src/tests/coin-analyzer/strategies/`)
+   - Тестируем логику каждой стратегии
+   - Проверяем корректность score calculation
+
+3. **Coordinator Tests** (`src/tests/coin-analyzer/coordinator.spec.ts`)
+   - Mock filters и strategies
+   - Проверяем aggregation logic
+   - Проверяем сохранение результатов
+
+4. **WeightAdaptation Tests** (`src/tests/coin-analyzer/weight-adaptation.spec.ts`)
+   - Mock repository с fake results
+   - Проверяем correct weight updates
+
+### Integration Test
+
+```bash
+npm test -- --testPathPattern="coin-analyzer.integration"
+```
+
+- Тест команды `/analyze` через mock Telegram update
+- Проверяем полный flow от команды до ответа
+
+### Manual Verification
+
+> [!IMPORTANT]
+> Ручная проверка через Telegram
+
+1. Запустить бот: `npm run dev`
+2. Отправить команду: `/analyze BTCUSDT`
+3. Проверить, что бот возвращает:
+   - Direction (Long/Short/Neutral)
+   - Confidence %
+   - Entry Price
+   - Stop Loss
+   - Entry Timing
+   - Filter scores breakdown
+   - Strategy scores breakdown
+
+---
+
+## Implementation Order
+
+| Phase | Описание | Файлы |
+|-------|----------|-------|
+| **1** | Types и Interfaces | `types.ts`, `interfaces.ts` |
+| **2** | Base classes | `base.filter.ts`, `base.strategy.ts` |
+| **3** | Core Services | `direction-resolver`, `entry-timing`, `stop-loss`, `confidence-scorer` |
+| **4** | Filters (по одному) | `market-regime`, `btc-correlation`, `volume-profile`, `liquidation-cluster` |
+| **5** | Strategies (по одному) | `oi-divergence`, `liquidation-hunt`, `volume-breakout` |
+| **6** | Coordinator | `coin-analyzer.coordinator.ts` |
+| **7** | Persistence | `analysis-result.entity`, `analysis-result.repository` |
+| **8** | Use Case + DTO | `analyze-coin.use-case.ts`, `coin-analysis.dto.ts` |
+| **9** | Telegram command | Modify [command.handler.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/presentation/telegram/handlers/command.handler.ts) |
+| **10** | DI Registration | Modify [app.container.ts](file:///c:/Users/amadeus/Desktop/OITrackerBot/src/app.container.ts) |
+| **11** | Weight Adaptation | `weight-adaptation.service.ts` |
+| **12** | Tests | Unit + Integration tests |
+
+---
+
+## User Review Required
+
+> [!WARNING]
+> Необходимо ваше решение по следующим вопросам
+
+### 1. Какие фильтры в первой версии?
+
+Предложенные 4 фильтра — это начальный набор. Хотите добавить/убрать какие-то?
+
+### 2. Какие стратегии в первой версии?
+
+Предложенные 3 стратегии — это начальный набор. Есть ли у вас специфические стратегии, которые хотите добавить?
+
+### 3. Период для авто-адаптации весов
+
+Предлагаю 24-48 часов для ретроспективы. Это подходит?
+
+### 4. Stop Loss calculation
+
+Предпочитаете ATR-based, Swing-based, или комбинацию?
+
+### 5. Entry Timing granularity
+
+Достаточно ли трёх уровней (IMMEDIATE / WAIT_PULLBACK / WAIT_CONFIRMATION)?

@@ -139,9 +139,52 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     this.subscribeToBatches();
     if (this.marketType === 'futures') {
       this.startAllTickersStream();
+      // Загружаем начальные данные OI для всех монет
+      await this.fetchInitialOI();
       this.startSmartOIPolling();
     }
     this.logger.info(`Connected to Binance ${this.marketType}`);
+  }
+
+  /**
+   * Загружает начальные данные OI для всех символов при старте.
+   * Выполняется пачками по MAX_REQ_PER_SEC запросов с задержкой 1 сек между пачками.
+   */
+  private async fetchInitialOI(): Promise<void> {
+    const symbolsArray = Array.from(this.symbols);
+    const totalSymbols = symbolsArray.length;
+    let loaded = 0;
+
+    this.logger.info(`Fetching initial OI for ${totalSymbols} symbols...`);
+
+    for (let i = 0; i < totalSymbols; i += MAX_REQ_PER_SEC) {
+      const batch = symbolsArray.slice(i, i + MAX_REQ_PER_SEC);
+
+      await Promise.all(batch.map(async (symbol) => {
+        try {
+          const res = await this.axiosInstance.get(BINANCE_FUTURES_OI_API, { params: { symbol } });
+          if (res.data?.openInterest) {
+            const val = parseFloat(res.data.openInterest);
+            const state = this.marketStates.get(symbol);
+            if (state) {
+              state.openInterest = val;
+            }
+            const p = this.priorityMap.get(symbol);
+            if (p) p.lastUpdated = Date.now();
+            loaded++;
+          }
+        } catch {
+          // Игнорируем ошибки при начальной загрузке
+        }
+      }));
+
+      // Задержка между пачками, кроме последней
+      if (i + MAX_REQ_PER_SEC < totalSymbols) {
+        await new Promise((r) => setTimeout(r, 1100));
+      }
+    }
+
+    this.logger.info(`Initial OI loaded for ${loaded}/${totalSymbols} symbols`);
   }
 
   public async disconnect(): Promise<void> {

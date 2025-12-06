@@ -9,8 +9,12 @@ import { UptimeService } from './infrastructure/services/uptime.service';
 import { NotificationService } from './infrastructure/services/notification.service';
 import { TriggerEngineService } from './infrastructure/services/trigger-engine.service';
 import { TechnicalAnalysisService } from './infrastructure/services/technical-analysis.service';
+import { SignalScannerService } from './infrastructure/services/signal-scanner.service';
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
+
+// Signal Analyzer (isolated module)
+import { SignalAnalyzerService } from './domain/signal-analyzer';
 
 // Telegram
 import { TelegramBotService } from './infrastructure/telegram/telegram.bot';
@@ -67,6 +71,9 @@ export function registerDependencies(): void {
   container.bind(GetTriggersUseCase, () => new GetTriggersUseCase(container.get('ITriggerRepository')));
   container.bind(RemoveTriggerUseCase, () => new RemoveTriggerUseCase(container.get('ITriggerRepository')));
 
+  // --- 6.5. Signal Analyzer (isolated module) ---
+  container.bind(SignalAnalyzerService, () => new SignalAnalyzerService());
+
   // --- 7. Application Entry ---
   container.bind(CommandHandler, () => new CommandHandler(
     container.get(TelegramBotService),
@@ -74,6 +81,14 @@ export function registerDependencies(): void {
     container.get(GetTriggersUseCase),
     container.get(RemoveTriggerUseCase),
     container.get(UptimeService),
+    container.get(SignalAnalyzerService),
+    container.get('IMarketDataRepository'),
+  ));
+
+  // --- 7.5. Signal Scanner (auto signal detection) ---
+  container.bind(SignalScannerService, () => new SignalScannerService(
+    container.get(SignalAnalyzerService),
+    container.get(TelegramBotService),
   ));
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(
@@ -82,5 +97,6 @@ export function registerDependencies(): void {
     container.get(TelegramBotService),
     container.get('ITriggerRepository'),
     container.get(CommandHandler),
+    container.get(SignalScannerService),
   ));
 }

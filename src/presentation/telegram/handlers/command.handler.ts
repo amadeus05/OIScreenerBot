@@ -11,6 +11,10 @@ import { Direction } from '../../../domain/types/direction.type';
 import { Trigger } from '../../../domain/entities/trigger.entity';
 import { PumpScoutBot } from '../../../app';
 import { UptimeService } from '../../../infrastructure/services/uptime.service';
+import { SignalAnalyzerService, SignalResult, smartCandlesToBarData, SupabaseDataProvider } from '../../../domain/signal-analyzer';
+import { IMarketDataRepository } from '../../../domain/interfaces/services.interface';
+
+
 
 @Injectable()
 export class CommandHandler {
@@ -23,6 +27,8 @@ export class CommandHandler {
     private readonly getTriggersUseCase: GetTriggersUseCase,
     private readonly removeTriggerUseCase: RemoveTriggerUseCase,
     private readonly uptimeService: UptimeService,
+    private readonly signalAnalyzer?: SignalAnalyzerService,
+    private readonly marketDataRepo?: IMarketDataRepository,
   ) {
     this.bot = this.telegramBotService.getBot();
   }
@@ -34,6 +40,8 @@ export class CommandHandler {
     // ADD: New uptime command
     this.bot.onText(/\/uptime/, this.handleUptime.bind(this));
     this.bot.onText(/\/status/, this.handleUptime.bind(this)); // Alias
+    // ADD: Signal analyzer command
+    this.bot.onText(/\/analyze/, this.handleAnalyze.bind(this));
     this.bot.on('callback_query', this.handleCallbackQuery.bind(this));
     this.logger.info('Telegram command handlers initialized.');
   }
@@ -199,5 +207,192 @@ export class CommandHandler {
         await this.bot.answerCallbackQuery(query.id, { text: 'Ошибка при удалении.' });
       }
     }
+  }
+
+  // =============================================
+  // SIGNAL ANALYZER COMMAND
+  // =============================================
+  private async handleAnalyze(msg: TelegramBot.Message): Promise<void> {
+    const chatId = msg.chat.id;
+
+    if (!this.signalAnalyzer) {
+      await this.telegramBotService.sendMessage(
+        chatId,
+        '❌ Signal Analyzer не доступен.'
+      );
+      return;
+    }
+
+    const parts = msg.text?.trim().split(/\s+/) || [];
+    if (parts.length < 2) {
+      await this.telegramBotService.sendMessage(
+        chatId,
+        '❌ Укажите символ. Пример: <code>/analyze BTCUSDT</code>'
+      );
+      return;
+    }
+
+    const symbol = parts[1].toUpperCase();
+
+    // Read at runtime (not module load time) to ensure dotenv has loaded
+    const dataSourceConfig = process.env.SIGNAL_ANALYZER_DATA_SOURCE || 'memory';
+    const useSupabase = dataSourceConfig === 'supabase';
+
+    // Debug: log data source
+    this.logger.info(`🔍 /analyze ${symbol}: DATA_SOURCE='${dataSourceConfig}', useSupabase=${useSupabase}`);
+
+    try {
+      let bars;
+      let dataSource: string;
+
+      if (useSupabase) {
+        // Fetch from Supabase
+        const supabaseProvider = new SupabaseDataProvider();
+
+        this.logger.info(`🔌 Supabase isConfigured: ${supabaseProvider.isConfigured()}`);
+
+        if (!supabaseProvider.isConfigured()) {
+          this.logger.error('❌ Supabase credentials missing');
+          await this.telegramBotService.sendMessage(
+            chatId,
+            '❌ Supabase не настроен. Установите SUPABASE_URL и SUPABASE_API_KEY.'
+          );
+          return;
+        }
+
+        this.logger.info(`📊 Checking hasEnoughData for ${symbol}...`);
+        const hasData = await supabaseProvider.hasEnoughData(symbol, 20);
+        this.logger.info(`📊 hasEnoughData(${symbol}): ${hasData}`);
+
+        if (!hasData) {
+          await this.telegramBotService.sendMessage(
+            chatId,
+            `⏳ Недостаточно данных для <b>${symbol}</b> в Supabase.`
+          );
+          return;
+        }
+
+        this.logger.info(`📥 Fetching history for ${symbol}...`);
+        bars = await supabaseProvider.getHistory(symbol, 500);
+        this.logger.info(`📥 Fetched ${bars?.length || 0} bars for ${symbol}`);
+        dataSource = 'Supabase';
+      } else {
+        // Use in-memory repository
+        if (!this.marketDataRepo) {
+          await this.telegramBotService.sendMessage(
+            chatId,
+            '❌ Репозиторий данных не запущен.'
+          );
+          return;
+        }
+
+        const knownSymbols = this.marketDataRepo.getAllKnownSymbols();
+        if (!knownSymbols.includes(symbol)) {
+          await this.telegramBotService.sendMessage(
+            chatId,
+            `❌ Символ <b>${symbol}</b> не найден. Доступно: ${knownSymbols.length} символов.`
+          );
+          return;
+        }
+
+        if (!this.marketDataRepo.isWarm(symbol)) {
+          await this.telegramBotService.sendMessage(
+            chatId,
+            `⏳ Недостаточно данных для <b>${symbol}</b>. Подождите несколько минут.`
+          );
+          return;
+        }
+
+        const candles = this.marketDataRepo.getHistory(symbol, 500);
+        bars = smartCandlesToBarData(candles, symbol);
+        dataSource = 'Memory';
+      }
+
+      if (!bars || bars.length < 20) {
+        await this.telegramBotService.sendMessage(
+          chatId,
+          `❌ Недостаточно данных для анализа <b>${symbol}</b>.`
+        );
+        return;
+      }
+
+      // CRITICAL: Warm up stateful modules with historical data BEFORE analyzing
+      // This ensures RollingStats, OIModule history, LevelsModule swings, etc. are properly initialized
+      if (!this.signalAnalyzer.isWarmedUp(symbol)) {
+        this.logger.info(`🔥 Warming up ${symbol} with ${bars.length} historical bars...`);
+        this.signalAnalyzer.warmUp(symbol, bars);
+      }
+
+      // Analyze (now modules have proper state)
+      const result = this.signalAnalyzer.analyze(symbol, bars);
+
+      // Format and send response
+      const message = this.formatSignalResult(result, dataSource);
+      await this.telegramBotService.sendMessage(chatId, message);
+
+      this.logger.debug(`Analyze command for ${symbol}: ${result.action} (source: ${dataSource})`);
+    } catch (error) {
+      this.logger.error(`Error analyzing ${symbol}:`, error);
+      await this.telegramBotService.sendMessage(
+        chatId,
+        `❗️ Ошибка анализа <b>${symbol}</b>.`
+      );
+    }
+  }
+
+  /**
+   * Format SignalResult for Telegram message
+   */
+  private formatSignalResult(result: SignalResult, dataSource?: string): string {
+    const actionEmoji = result.action === 'LONG' ? '🟢' : result.action === 'SHORT' ? '🔴' : '⚪';
+    const confEmoji = result.confidenceLevel === 'HIGH' ? '🔥' : result.confidenceLevel === 'MEDIUM' ? '✅' : '⚠️';
+    const sourceLabel = dataSource ? ` (${dataSource})` : '';
+
+    if (result.action === 'NO_TRADE') {
+      return `
+📊 <b>Анализ: ${result.symbol}</b>${sourceLabel}
+
+${actionEmoji} <b>Сигнал:</b> NO_TRADE
+
+${confEmoji} <b>Причина:</b> ${result.reasonTags.join(', ') || 'Ниже порога'}
+
+📈 <b>Скоры модулей:</b>
+• Orderflow: ${(result.modules.orderflow || 0).toFixed(2)}
+• OI: ${(result.modules.oi || 0).toFixed(2)}
+• Momentum: ${(result.modules.momentum || 0).toFixed(2)}
+• Levels: ${(result.modules.levels || 0).toFixed(2)}
+• Liquidations: ${(result.modules.liquidations || 0).toFixed(2)}
+
+<i>Raw Score: ${result.meta.rawScore?.toFixed(3) || '0'}</i>
+      `.trim();
+    }
+
+    const slPct = ((result.sl - result.entryPrice) / result.entryPrice * 100).toFixed(2);
+    const tp1Pct = result.tpPct[0]?.toFixed(2) || '0';
+    const tp2Pct = result.tpPct[1]?.toFixed(2) || '0';
+
+    return `
+📊 <b>Анализ: ${result.symbol}</b>${sourceLabel}
+
+${actionEmoji} <b>Сигнал:</b> ${result.action} ${confEmoji}
+🎯 <b>Confidence:</b> ${(result.confidence * 100).toFixed(0)}% (${result.confidenceLevel})
+
+📍 <b>Entry:</b> $${result.entryPrice.toFixed(2)} (${result.entryType})
+🛑 <b>SL:</b> $${result.sl.toFixed(2)} (${slPct}%)
+🎯 <b>TP1:</b> $${result.tp[0]?.toFixed(2) || '-'} (+${tp1Pct}%)
+🎯 <b>TP2:</b> $${result.tp[1]?.toFixed(2) || '-'} (+${tp2Pct}%)
+
+⏱️ <b>Горизонт:</b> ~${result.horizonMin} мин
+💰 <b>Риск:</b> ${result.riskPct.toFixed(2)}%
+
+📈 <b>Модули:</b>
+• Orderflow: ${(result.modules.orderflow || 0).toFixed(2)}
+• OI: ${(result.modules.oi || 0).toFixed(2)}
+• Momentum: ${(result.modules.momentum || 0).toFixed(2)}
+• Levels: ${(result.modules.levels || 0).toFixed(2)}
+• Liquidations: ${(result.modules.liquidations || 0).toFixed(2)}
+
+🏷️ <b>Теги:</b> ${result.reasonTags.slice(0, 5).join(', ')}
+    `.trim();
   }
 }

@@ -4,6 +4,7 @@ import { IMarketDataGateway, ITriggerEngineService } from './domain/interfaces/s
 import { TelegramBotService } from './infrastructure/telegram/telegram.bot';
 import { ITriggerRepository } from './domain/interfaces/repositories.interface';
 import { CommandHandler } from './presentation/telegram/handlers/command.handler';
+import { SignalScannerService } from './infrastructure/services/signal-scanner.service';
 
 @Injectable()
 export class PumpScoutBot {
@@ -15,7 +16,8 @@ export class PumpScoutBot {
     private readonly telegramBotService: TelegramBotService,
     @Inject('ITriggerRepository') private readonly triggerRepository: ITriggerRepository,
     private readonly commandHandler: CommandHandler,
-  ) {}
+    private readonly signalScanner: SignalScannerService,
+  ) { }
 
   public async start(): Promise<void> {
     this.logger.info('Initializing Pump Scout Bot...');
@@ -30,6 +32,9 @@ export class PumpScoutBot {
 
       this.commandHandler.initialize();
 
+      // Start signal scanner
+      this.signalScanner.start();
+
       this.logger.info('Pump Scout Bot started successfully!');
     } catch (error) {
       this.logger.error('Failed to initialize Pump Scout Bot:', error);
@@ -39,9 +44,11 @@ export class PumpScoutBot {
 
   public async stop(): Promise<void> {
     this.logger.info('Stopping Pump Scout Bot...');
+    this.signalScanner.stop();
     this.triggerEngine.stop();
     await this.marketDataGateway.disconnect();
     await this.telegramBotService.stop();
     this.logger.info('Pump Scout Bot stopped gracefully.');
   }
 }
+

@@ -1,21 +1,15 @@
-/**
- * Signal Analyzer Module - Levels Module V2
- * 
- * Enhanced S/R level detection with:
- * 1. ATR-based swing detection with tolerance
- * 2. Multi-factor strength calculation (touches, volume, bounce)
- * 3. Touch tracking and level confirmation
- * 4. Level decay over time
- * 5. ATR-based clustering (not % based)
- * 6. Confirmed breakout detection with role reversal
- * 7. Multi-level context
- * 8. Bar-based decay (timeframe independent)
- */
-
 import { Features, ModuleOutput, BarData, AggregatedBar, SwingPoint, PriceLevel, LevelContext } from '../types';
 import { DEFAULT_CONFIG, MODULE_CONFIG } from '../types/config';
 import { BaseModule } from './base-module';
 
+/**
+ * Signal Analyzer Module - Levels Module V3 (Smart Reversal)
+ * * Enhanced logic:
+ * 1. SFP (Swing Failure Pattern) detection - trading reversals on fakeouts.
+ * 2. FOMO Filter - ignores breakouts if price is too extended.
+ * 3. Proximity Reversal - trades against the level when approached (limit walls).
+ * 4. Standard Swing High/Low detection with ATR tolerance.
+ */
 export class LevelsModule extends BaseModule {
     readonly name = 'levels' as const;
 
@@ -40,130 +34,165 @@ export class LevelsModule extends BaseModule {
 
     analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
         const tags: string[] = [];
-
+        // Need enough data for swing detection
         if (bars.length < this.config.swingWindow * 2 + 1) {
             return this.createOutput(0, 0.3, tags);
         }
 
         const currentBar = bars[bars.length - 1];
         const currentPrice = currentBar.c;
+        
+        // Require valid ATR or fallback safely
+        const atr = features.atr > 0 ? features.atr : currentPrice * 0.01;
 
-        // Require valid ATR - don't guess
-        if (features.atr <= 0) {
-            return this.createOutput(0, 0.3, ['atr_not_ready']);
-        }
-        const atr = features.atr;
-
-        // Apply bar-based decay (not timestamp-based - timeframe independent)
+        // Apply bar-based decay
         if (currentBar.ts !== this.lastProcessedBarTs) {
             this.barCount++;
             this.lastProcessedBarTs = currentBar.ts;
             this.applyDecay();
         }
 
-        // Detect new swing points with ATR tolerance
+        // 1. Detect new swings & Update existing levels
         this.detectSwingsWithTolerance(bars, atr);
-
-        // Check for touches on existing levels
         this.checkTouches(currentBar, atr);
-
-        // Remove weak levels
         this.pruneWeakLevels();
 
-        // Get level context
+        // 2. Get Context
         const context = this.getLevelContext(currentPrice, atr);
 
         let score = 0;
         let reliability = 0.4;
 
-        // === Breakout Detection FIRST (to know if we should skip proximity penalties) ===
+        // === STRATEGY LOGIC START ===
+
+        // A. BREAKOUT / BREAKDOWN DETECTION
         const breakout = this.detectConfirmedBreakout(bars, atr);
         const hasBreakout = breakout.type !== 'none';
 
-        // === Proximity Analysis (skip if breakout detected) ===
-        const priceRange = atr * 3;
-
-        if (context.nearestResistance && !hasBreakout) {
-            const distToResistance = context.nearestResistance.price - currentPrice;
-            const normalizedDist = distToResistance / priceRange;
-
-            if (normalizedDist > 0 && normalizedDist < 1) {
-                const penalty = this.moduleConfig.nearLevelPenalty * context.nearestResistance.strength;
-                score -= penalty;
-                tags.push('near_resistance');
-
-                if (normalizedDist < 0.3) {
-                    tags.push('at_resistance');
-                    score -= 0.2;
-                }
-
-                if (context.nearestResistance.isConfirmed) {
-                    tags.push('confirmed_resistance');
-                    reliability += 0.15;
+        // B. SFP (SWING FAILURE PATTERN) - The "Smart Money" Signal
+        // Logic: We pierced the level but closed back inside. 
+        // This is a liquidity grab, expect immediate reversal.
+        let isSFP = false;
+        
+        if (context.nearestResistance) {
+            // Price went above resistance but closed below it
+            if (currentBar.h > context.nearestResistance.price && currentBar.c < context.nearestResistance.price) {
+                const wickSize = currentBar.h - currentBar.c;
+                // Ensure it's a significant rejection (not just noise)
+                if (wickSize > atr * 0.3) {
+                    tags.push('resistance_SFP_rejection');
+                    score -= 0.6; // Strong SHORT signal
+                    reliability += 0.2; // High reliability pattern
+                    isSFP = true;
                 }
             }
         }
-
-        if (context.nearestSupport && !hasBreakout) {
-            const distToSupport = currentPrice - context.nearestSupport.price;
-            const normalizedDist = distToSupport / priceRange;
-
-            if (normalizedDist > 0 && normalizedDist < 1) {
-                const bonus = this.moduleConfig.nearLevelPenalty * context.nearestSupport.strength;
-                score += bonus;
-                tags.push('near_support');
-
-                if (normalizedDist < 0.3) {
-                    tags.push('at_support');
-                    score += 0.2;
-                }
-
-                if (context.nearestSupport.isConfirmed) {
-                    tags.push('confirmed_support');
-                    reliability += 0.15;
+        
+        if (context.nearestSupport) {
+            // Price went below support but closed above it
+            if (currentBar.l < context.nearestSupport.price && currentBar.c > context.nearestSupport.price) {
+                const wickSize = currentBar.c - currentBar.l;
+                if (wickSize > atr * 0.3) {
+                    tags.push('support_SFP_rejection');
+                    score += 0.6; // Strong LONG signal
+                    reliability += 0.2;
+                    isSFP = true;
                 }
             }
         }
 
-        // === Apply breakout signals ===
-        if (breakout.type === 'resistance_breakout') {
-            tags.push('resistance_breakout');
-            score += 0.4 * breakout.strength;
-            reliability += 0.2;
-
-            if (breakout.volumeConfirmed) {
-                tags.push('volume_breakout');
-                score += 0.15;
+        // C. STANDARD BREAKOUTS (With FOMO Filter)
+        // Only trade breakout if we haven't already moved too far
+        if (!isSFP) {
+            if (breakout.type === 'resistance_breakout') {
+                const distFromLevel = (currentPrice - (context.nearestResistance?.price || currentPrice)) / atr;
+                
+                // FOMO FILTER: If we are > 0.5 ATR away from the broken level, it's too late.
+                if (distFromLevel < 0.5) {
+                    tags.push('resistance_breakout');
+                    score += 0.5 * breakout.strength;
+                    reliability += 0.2;
+                    
+                    if (breakout.volumeConfirmed) {
+                        tags.push('volume_breakout');
+                        score += 0.1;
+                    }
+                } else {
+                    tags.push('breakout_extended_ignored');
+                }
+            } 
+            else if (breakout.type === 'support_breakdown') {
+                const distFromLevel = ((context.nearestSupport?.price || currentPrice) - currentPrice) / atr;
+                
+                if (distFromLevel < 0.5) {
+                    tags.push('support_breakdown');
+                    score -= 0.5 * breakout.strength;
+                    reliability += 0.2;
+                    
+                    if (breakout.volumeConfirmed) {
+                        tags.push('volume_breakdown');
+                        score -= 0.1;
+                    }
+                } else {
+                    tags.push('breakout_extended_ignored');
+                }
             }
         }
 
-        if (breakout.type === 'support_breakdown') {
-            tags.push('support_breakdown');
-            score -= 0.4 * breakout.strength;
-            reliability += 0.2;
+        // D. PROXIMITY REVERSAL (Bounce Logic)
+        // If we are near a level but NOT breaking out and NOT SFP-ing, we assume the level holds.
+        if (!hasBreakout && !isSFP) {
+            const priceRange = atr * 2; // Look within 2 ATR
 
-            if (breakout.volumeConfirmed) {
-                tags.push('volume_breakdown');
-                score -= 0.15;
+            // Resistance -> Expect Short (Bounce down)
+            if (context.nearestResistance) {
+                const dist = context.nearestResistance.price - currentPrice;
+                if (dist > 0 && dist < priceRange) {
+                    tags.push('near_resistance');
+                    // Negative score (Short) proportional to level strength
+                    score -= 0.3 * context.nearestResistance.strength;
+                    
+                    // Too close?
+                    if (dist < atr * 0.5) {
+                        tags.push('at_resistance');
+                        score -= 0.1; 
+                    }
+                }
+            }
+
+            // Support -> Expect Long (Bounce up)
+            if (context.nearestSupport) {
+                const dist = currentPrice - context.nearestSupport.price;
+                if (dist > 0 && dist < priceRange) {
+                    tags.push('near_support');
+                    // Positive score (Long)
+                    score += 0.3 * context.nearestSupport.strength;
+                    
+                    if (dist < atr * 0.5) {
+                        tags.push('at_support');
+                        score += 0.1;
+                    }
+                }
             }
         }
 
-        // === Room to Move Analysis ===
+        // E. CONTEXT MODIFIERS
+        if (context.inConsolidation) {
+            tags.push('in_consolidation');
+            // In consolidation, levels are more respected -> boost score
+            score *= 1.2;
+        }
+
+        // Room to move (Target analysis)
         if (context.roomToMove < 1.0) {
             tags.push('tight_range');
-            reliability -= 0.1;
+            reliability -= 0.1; // Risk of chop
         } else if (context.roomToMove > 3.0) {
             tags.push('room_to_run');
             reliability += 0.1;
         }
 
-        // === Consolidation Detection ===
-        if (context.inConsolidation) {
-            tags.push('in_consolidation');
-            score *= 0.7;
-        }
-
-        // Level strength affects reliability
+        // Strong level bonus
         const maxStrength = Math.max(
             context.nearestResistance?.strength || 0,
             context.nearestSupport?.strength || 0
@@ -188,7 +217,7 @@ export class LevelsModule extends BaseModule {
         const tolerance = atr * this.config.swingToleranceAtr;
 
         if (bars.length < window * 2 + 1) return;
-
+        
         const checkIndex = bars.length - window - 1;
         const checkBar = bars[checkIndex];
 
@@ -237,7 +266,7 @@ export class LevelsModule extends BaseModule {
         const now = Date.now();
         const minSwingHeight = atr / 3;
 
-        // Calculate SMA(volume, 10) relative to checkIndex (no look-ahead bias)
+        // Calculate SMA(volume, 10) relative to checkIndex
         const volSmaWindow = Math.min(10, checkIndex);
         const startSma = Math.max(0, checkIndex - volSmaWindow);
         const smaSlice = bars.slice(startSma, checkIndex);
@@ -263,7 +292,7 @@ export class LevelsModule extends BaseModule {
             const significance = highScore / (atr * window);
             const volumeScore = this.calculateVolumeSignificance(bars, checkIndex);
             const initialStrength = Math.min(1, 0.3 + significance * 0.3 + volumeScore * 0.4);
-
+            
             const swingPoint: SwingPoint = {
                 id: this.generateId(),
                 ts: checkBar.ts,
@@ -300,7 +329,7 @@ export class LevelsModule extends BaseModule {
             const significance = lowScore / (atr * window);
             const volumeScore = this.calculateVolumeSignificance(bars, checkIndex);
             const initialStrength = Math.min(1, 0.3 + significance * 0.3 + volumeScore * 0.4);
-
+            
             const swingPoint: SwingPoint = {
                 id: this.generateId(),
                 ts: checkBar.ts,
@@ -338,7 +367,6 @@ export class LevelsModule extends BaseModule {
         if (count === 0) return 0.5;
         const avgNeighborVol = totalNeighborVol / count;
         const ratio = bar.v / Math.max(avgNeighborVol, 1);
-
         return Math.min(1, 0.5 + (ratio - 1) * 0.25);
     }
 
@@ -363,7 +391,7 @@ export class LevelsModule extends BaseModule {
             }
 
             existing.strength = this.calculateMultiFactorStrength(existing);
-
+            
             // Update price to weighted average
             const totalWeight = existing.touchVolumes.reduce((a, b) => a + b, 0);
             if (totalWeight > 0) {
@@ -379,7 +407,6 @@ export class LevelsModule extends BaseModule {
             }
         } else {
             list.push(point);
-
             if (list.length > this.config.maxLevels) {
                 list.sort((a, b) => {
                     const aScore = a.strength * (1 + a.touchCount * 0.1);
@@ -417,39 +444,9 @@ export class LevelsModule extends BaseModule {
         const typicalPrice = (currentBar.h + currentBar.l + currentBar.c) / 3;
 
         for (const level of this.swingHighs) {
-            // Use bar range intersection, not just high
+            // Use bar range intersection
             if (currentBar.h >= level.price - touchThreshold && currentBar.l <= level.price + touchThreshold) {
                 const bounce = Math.abs(level.price - currentBar.c) / atr;
-
-                level.touchCount++;
-                level.lastTouchTs = currentBar.ts;
-                level.touchPrices.push(typicalPrice); // Use typical price, not just high
-                level.touchVolumes.push(currentBar.v);
-
-                // Cap arrays
-                if (level.touchPrices.length > this.config.maxTouchHistory) {
-                    level.touchPrices.splice(0, level.touchPrices.length - this.config.maxTouchHistory);
-                    level.touchVolumes.splice(0, level.touchVolumes.length - this.config.maxTouchHistory);
-                }
-
-                if (bounce > 0) {
-                    const prevTotal = level.avgBounce * (level.touchCount - 1);
-                    level.avgBounce = (prevTotal + bounce) / level.touchCount;
-                    level.maxBounce = Math.max(level.maxBounce, bounce);
-                }
-
-                level.strength = this.calculateMultiFactorStrength(level);
-
-                if (level.touchCount >= this.config.minTouchesForConfirmed && level.confirmedAt === 0) {
-                    level.confirmedAt = Date.now();
-                }
-            }
-        }
-
-        for (const level of this.swingLows) {
-            if (currentBar.l <= level.price + touchThreshold && currentBar.h >= level.price - touchThreshold) {
-                const bounce = Math.abs(currentBar.c - level.price) / atr;
-
                 level.touchCount++;
                 level.lastTouchTs = currentBar.ts;
                 level.touchPrices.push(typicalPrice);
@@ -467,7 +464,32 @@ export class LevelsModule extends BaseModule {
                 }
 
                 level.strength = this.calculateMultiFactorStrength(level);
+                if (level.touchCount >= this.config.minTouchesForConfirmed && level.confirmedAt === 0) {
+                    level.confirmedAt = Date.now();
+                }
+            }
+        }
 
+        for (const level of this.swingLows) {
+            if (currentBar.l <= level.price + touchThreshold && currentBar.h >= level.price - touchThreshold) {
+                const bounce = Math.abs(currentBar.c - level.price) / atr;
+                level.touchCount++;
+                level.lastTouchTs = currentBar.ts;
+                level.touchPrices.push(typicalPrice);
+                level.touchVolumes.push(currentBar.v);
+
+                if (level.touchPrices.length > this.config.maxTouchHistory) {
+                    level.touchPrices.splice(0, level.touchPrices.length - this.config.maxTouchHistory);
+                    level.touchVolumes.splice(0, level.touchVolumes.length - this.config.maxTouchHistory);
+                }
+
+                if (bounce > 0) {
+                    const prevTotal = level.avgBounce * (level.touchCount - 1);
+                    level.avgBounce = (prevTotal + bounce) / level.touchCount;
+                    level.maxBounce = Math.max(level.maxBounce, bounce);
+                }
+
+                level.strength = this.calculateMultiFactorStrength(level);
                 if (level.touchCount >= this.config.minTouchesForConfirmed && level.confirmedAt === 0) {
                     level.confirmedAt = Date.now();
                 }
@@ -476,15 +498,13 @@ export class LevelsModule extends BaseModule {
     }
 
     /**
-     * Apply bar-based decay (timeframe independent - 1 call = 1 bar)
+     * Apply bar-based decay
      */
     private applyDecay(): void {
         const decayAmount = this.config.decayRatePerBar;
-
         for (const level of this.swingHighs) {
             level.strength = Math.max(0, level.strength - decayAmount);
         }
-
         for (const level of this.swingLows) {
             level.strength = Math.max(0, level.strength - decayAmount);
         }
@@ -519,7 +539,6 @@ export class LevelsModule extends BaseModule {
             const hasBodyMove = recentBars.some(bar => (bar.c - bar.o) > atr * 0.1 && bar.c > resistance.price);
 
             if (closesAbove >= Math.ceil(confirmBars * 0.6) && hasBodyMove) {
-                // Safe priorVol calculation
                 const avgVol = recentBars.reduce((sum, bar) => sum + bar.v, 0) / confirmBars;
                 const priorWindowStart = Math.max(0, bars.length - confirmBars - this.config.priorVolBars);
                 const priorWindowEnd = Math.max(0, bars.length - confirmBars);
@@ -592,7 +611,7 @@ export class LevelsModule extends BaseModule {
         const resistancesSorted = [...this.swingHighs]
             .filter(l => l.price > currentPrice)
             .sort((a, b) => a.price - b.price);
-
+        
         const supportsSorted = [...this.swingLows]
             .filter(l => l.price < currentPrice)
             .sort((a, b) => b.price - a.price);
@@ -604,6 +623,7 @@ export class LevelsModule extends BaseModule {
 
         const distToResistance = nearestResistance ? nearestResistance.price - currentPrice : Infinity;
         const distToSupport = nearestSupport ? currentPrice - nearestSupport.price : Infinity;
+        
         const minDist = Math.min(distToResistance, distToSupport);
         const distanceToNearestPct = minDist / currentPrice * 100;
 

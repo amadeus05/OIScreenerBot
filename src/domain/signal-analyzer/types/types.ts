@@ -162,7 +162,7 @@ export interface SignalResult {
     meta: {
         rawScore: number;
         moduleAgreement: number;
-        [key: string]: number | string;
+        [key: string]: any;
     };
 }
 

@@ -10,20 +10,14 @@ export interface EntryResult {
     tpPct: number[];
     horizonMin: number;
     riskPct: number;
-    isValid: boolean; // Флаг: стоит ли открывать сделку (проверка RR и комиссий)
+    isValid: boolean;
     reason?: string;
 }
 
 export class EntryCalculator {
-    private readonly config = DEFAULT_CONFIG.technical;
     private readonly positionConfig = DEFAULT_CONFIG.position;
+    private readonly MIN_PROFIT_PCT = 0.0025; // 0.25% min target
 
-    // Минимальный профит, чтобы перекрыть комиссии (0.06% taker * 2 + проскальзывание)
-    private readonly MIN_PROFIT_PCT = 0.002; // 0.2%
-
-    /**
-     * Calculate entry parameters for a trade
-     */
     calculate(
         action: TradeAction,
         bars: (BarData | AggregatedBar)[],
@@ -38,40 +32,69 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // 1. Определение типа входа
-        // Если уверенность высокая (>0.7) - бьем по рынку, чтобы не упустить движение.
-        // Если средняя - пробуем лимитку (pullback).
-        const isUrgent = confidence >= 0.7;
+        // 1. ENTRY LOGIC
+        // Для стратегии разворота (Mean Reversion), если уверенность высокая - бьем по рынку,
+        // так как цена может быстро улететь от дисбаланса.
+        // Если уверенность средняя - пытаемся поймать ретест EMA.
+        const isUrgent = confidence >= 0.6; 
+        
+        let entryPrice = currentBar.c;
+        let entryType: EntryType = 'market';
 
-        const { entryType, entryPrice } = this.calculateEntry(
-            currentBar.lastPrice,
-            features.atr,
-            direction,
-            isUrgent
-        );
-
-        // 2. Расчет Stop Loss
-        const sl = this.calculateSmartStopLoss(bars, entryPrice, features.atr, isLong);
-        const riskDist = Math.abs(entryPrice - sl);
-
-        // Проверка: Если стоп слишком близко (шум) или слишком далеко (риск)
-        const riskPct = riskDist / entryPrice;
-        if (riskPct < 0.001) { // Стоп < 0.1% - это самоубийство об спред
-            return this.invalidResult('Stop Loss too tight (spread risk)');
+        if (!isUrgent) {
+            entryType = 'limit';
+            // Пытаемся взять от emaFast, если она близко, иначе просто небольшой отступ
+            const smartPullback = features.emaFast;
+            // Проверка, что emaFast не слишком далеко (> 0.5% цены), иначе ордер никогда не исполнится
+            const distToEma = Math.abs(currentBar.c - smartPullback) / currentBar.c;
+            
+            if (distToEma < 0.005) {
+                entryPrice = smartPullback;
+            } else {
+                // Фоллбэк: 0.1 ATR отступ
+                entryPrice = currentBar.c - (direction * features.atr * 0.1);
+            }
         }
 
-        // 3. Расчет Take Profit
-        const { tp, tpPct } = this.calculateTakeProfit(entryPrice, riskDist, isLong, confidence);
+        // 2. STOP LOSS (TIGHT)
+        // Для разворотов стоп должен быть коротким. Сразу за экстремумом.
+        const lookback = 10;
+        const recentHigh = Math.max(...bars.slice(-lookback).map(b => b.h));
+        const recentLow = Math.min(...bars.slice(-lookback).map(b => b.l));
+        
+        let sl = isLong 
+            ? Math.min(recentLow, currentBar.l) - (features.atr * 0.5) 
+            : Math.max(recentHigh, currentBar.h) + (features.atr * 0.5);
 
-        // 4. Финальная валидация (RR Check)
-        // Первый тейк должен быть больше минимального порога рентабельности
+        // Safety check: Don't let SL be closer than 0.2% (noise)
+        const minSlDist = entryPrice * 0.002;
+        if (Math.abs(entryPrice - sl) < minSlDist) {
+            sl = entryPrice - (direction * minSlDist);
+        }
+
+        // 3. TAKE PROFIT (Mean Reversion Targets)
+        // Цель 1: Возврат к средней (EMA Slow)
+        // Цель 2: Противоположный канал (2 ATR)
+        const distSl = Math.abs(entryPrice - sl);
+        
+        // TP1: Minimal 1.5R or EMA Slow cross
+        let tp1 = entryPrice + (direction * distSl * 1.5);
+        
+        // Если EMA Slow выгоднее чем 1.5R, ставим её (возврат к средней)
+        const distToMean = (features.emaSlow - entryPrice) * direction;
+        if (distToMean > distSl * 1.5) {
+            tp1 = features.emaSlow;
+        }
+
+        const tp2 = entryPrice + (direction * distSl * 3.0); // Runner
+
+        const tp = [tp1, tp2];
+        const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
+
+        // 4. VALIDATION
         if (tpPct[0] < this.MIN_PROFIT_PCT * 100) {
-            return this.invalidResult('Potential profit covers only fees');
+             return this.invalidResult('RR too low (Target too close)');
         }
-
-        // 5. Горизонт и Риск на сделку
-        const horizonMin = this.calculateHorizon(features.atr, bars);
-        const positionRiskPct = this.positionConfig.baseRiskPct * confidence;
 
         return {
             entryType,
@@ -79,151 +102,17 @@ export class EntryCalculator {
             sl,
             tp,
             tpPct,
-            horizonMin,
-            riskPct: positionRiskPct,
+            horizonMin: 15, // Reversals are usually quick
+            riskPct: this.positionConfig.baseRiskPct * confidence,
             isValid: true
         };
     }
 
-    private calculateEntry(
-        lastPrice: number,
-        atr: number,
-        direction: number,
-        isUrgent: boolean
-    ): { entryType: EntryType; entryPrice: number } {
-        // High Confidence -> Market Order
-        if (isUrgent) {
-            return {
-                entryType: 'market',
-                entryPrice: lastPrice, // Для бэктеста считаем по текущей, в реале будет проскальзывание
-            };
-        }
-
-        // Medium Confidence -> Limit Order (Smart Pullback)
-        // Ставим лимитку чуть лучше текущей цены, но не слишком далеко
-        const offset = atr > 0 ? atr * 0.15 : lastPrice * 0.0005;
-        return {
-            entryType: 'limit',
-            entryPrice: lastPrice - (direction * offset),
-        };
-    }
-
-    private calculateSmartStopLoss(
-        bars: (BarData | AggregatedBar)[],
-        entryPrice: number,
-        atr: number,
-        isLong: boolean
-    ): number {
-        const direction = isLong ? 1 : -1;
-
-        // 1. Поиск локального фрактала (Pivot)
-        // Ищем Low/High, который окружен более высокими Low (для лонга)
-        // Берем окно 20 баров
-        const lookback = Math.min(bars.length, 20);
-        const relevantBars = bars.slice(-lookback);
-
-        let structuralPrice: number | null = null;
-
-        if (isLong) {
-            // Ищем минимальный Low
-            structuralPrice = Math.min(...relevantBars.map(b => b.l));
-        } else {
-            // Ищем максимальный High
-            structuralPrice = Math.max(...relevantBars.map(b => b.h));
-        }
-
-        // 2. Валидация через ATR (Clamp)
-        const distToStructure = Math.abs(entryPrice - structuralPrice);
-        const minDist = atr * 0.8; // Минимум 0.8 ATR (поднял с 0.5, чтобы избежать шума)
-        const maxDist = atr * 3.0; // Максимум 3 ATR
-
-        let finalDistance = distToStructure;
-
-        // Если структурный стоп слишком близко -> расширяем до ATR
-        if (distToStructure < minDist) {
-            finalDistance = minDist;
-        }
-        // Если структурный стоп слишком далеко -> поджимаем до 3 ATR
-        else if (distToStructure > maxDist) {
-            finalDistance = maxDist;
-        }
-
-        // 3. Буфер на сквиз
-        // Добавляем 5% от размера стопа про запас
-        finalDistance *= 1.05;
-
-        return entryPrice - (direction * finalDistance);
-    }
-
-    private calculateTakeProfit(
-        entryPrice: number,
-        riskDist: number, // Расстояние до стопа
-        isLong: boolean,
-        confidence: number
-    ): { tp: number[]; tpPct: number[] } {
-        const direction = isLong ? 1 : -1;
-
-        // Динамический RR в зависимости от уверенности
-        // Low Conf: 1:1, 1:1.5
-        // High Conf: 1:1.5, 1:2.5
-        let ratios = [1.0, 1.5];
-
-        if (confidence > 0.75) {
-            ratios = [1.3, 2.5]; // Требуем больше от хорошей сделки
-        }
-
-        const tp: number[] = [];
-        const tpPct: number[] = [];
-
-        for (const ratio of ratios) {
-            const price = entryPrice + (direction * riskDist * ratio);
-            const pct = Math.abs((price - entryPrice) / entryPrice) * 100;
-
-            tp.push(price);
-            tpPct.push(pct);
-        }
-
-        return { tp, tpPct };
-    }
-
-    private calculateHorizon(atr: number, bars: (BarData | AggregatedBar)[]): number {
-        // Если волатильность дикая (ATR растет), горизонт сокращаем (скальпинг)
-        // Если флэт, горизонт увеличиваем
-        if (bars.length < 20) return 15;
-
-        const recentATRs = bars.slice(-10).map(b => b.h - b.l);
-        const avgRecentAtr = recentATRs.reduce((a, b) => a + b) / recentATRs.length;
-
-        let horizon = 15; // Base
-
-        if (avgRecentAtr > 0 && atr > 0) {
-            const volatilityRatio = atr / avgRecentAtr;
-            // Если текущая волатильность в 2 раза выше средней -> горизонт 7 минут
-            // Если в 2 раза ниже -> горизонт 30 минут
-            horizon = Math.round(15 / volatilityRatio);
-        }
-
-        return clamp(horizon, 5, 60);
-    }
-
     private emptyResult(): EntryResult {
-        return {
-            entryType: 'market',
-            entryPrice: 0,
-            sl: 0,
-            tp: [],
-            tpPct: [],
-            horizonMin: 0,
-            riskPct: 0,
-            isValid: false
-        };
+        return { entryType: 'market', entryPrice: 0, sl: 0, tp: [], tpPct: [], horizonMin: 0, riskPct: 0, isValid: false };
     }
 
     private invalidResult(reason: string): EntryResult {
-        return {
-            ...this.emptyResult(),
-            isValid: false,
-            reason
-        };
+        return { ...this.emptyResult(), isValid: false, reason };
     }
 }

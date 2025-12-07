@@ -1,18 +1,14 @@
 import { Features, ModuleOutput, BarData, AggregatedBar } from '../types';
 import { MODULE_CONFIG } from '../types/config';
 import { BaseModule } from './base-module';
-import { sigmoid, clamp } from '../utils/rolling-stats'; // Предполагаем наличие
+import { sigmoid, clamp } from '../utils/rolling-stats';
 
 export class OrderflowModule extends BaseModule {
     readonly name = 'orderflow' as const;
-
     private readonly config = MODULE_CONFIG.orderflow;
 
-    // История dCVD для расчета волатильности потока
     private dCVDHistory: number[] = [];
     private readonly historySize = 50;
-
-    // Защита от дублирования данных внутри бара
     private lastProcessedTime = 0;
 
     analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
@@ -36,72 +32,70 @@ export class OrderflowModule extends BaseModule {
         }
 
         // 3. CALCULATION
-
-        // A. Flow Imbalance
         const flowNorm = clamp(features.flowImb, -1, 1);
-
-        // B. dCVD Normalization (StdDev)
+        
+        // dCVD Normalization
         const rawStd = this.calculateStd(this.dCVDHistory);
-
-        // FIX: Noise Floor - не делим на микроскопические значения
-        // Если buyVol около 0, берем 1000 единиц как минимум (чтобы не делить на 0)
-        const minStd = Math.max(features.buyVol * 0.05, 1000);
+        // Noise floor protection
+        const minStd = Math.max(features.buyVol * 0.05, 5000); // Increased floor
         const effectiveStd = Math.max(rawStd, minStd);
-
         const dCVDNorm = features.dCVD / effectiveStd;
-
-        // Sigmoid mapping -> range [-1, 1]
         const dCVDComponent = clamp((sigmoid(dCVDNorm) * 2) - 1, -1, 1);
 
-        // C. Volume Component
-        // FIX (Improved Logic): Объем имеет вес только если есть направленный поток
+        // Volume Component
         const volSign = Math.abs(flowNorm) > 0.1 ? Math.sign(flowNorm) : 0;
         const volComponent = clamp(features.volZ, -2, 2) * volSign;
 
-        // 4. SCORING
+        // 4. SCORING (Standard)
         const rawScore =
             this.config.flowWeight * flowNorm +
             this.config.dcvdWeight * dCVDComponent +
-            this.config.volZWeight * volComponent; // FIX #4: Убрали лишнее ослабление (* 0.5)
+            this.config.volZWeight * volComponent;
 
-        const score = Math.tanh(this.config.tanhScale * rawScore);
-
-        // 5. RELIABILITY & TAGGING
-        let reliability = 0.6; // Базовая уверенность
+        let score = Math.tanh(this.config.tanhScale * rawScore);
+        let reliability = 0.6;
         const priceRet = features.priceReturn;
 
-        // Basic classification
-        if (score > 0.5) tags.push('strong_buying_pressure');
-        else if (score < -0.5) tags.push('strong_selling_pressure');
+        // ====================================================================
+        // 5. ABSORPTION / DIVERGENCE LOGIC (Priority Overrides)
+        // ====================================================================
+        
+        // Significant Delta Threshold (e.g., 2 standard deviations or absolute high value)
+        const isSignificantDelta = Math.abs(features.dCVD) > effectiveStd * 1.5;
+        const isSignificantVolume = features.volZ > 1.0;
 
-        // --- DIVERGENCE LOGIC (FIX #1) ---
-
-        // Сценарий 1: CVD растет (покупают), но цена падает/стоит.
-        // Это значит, что кто-то лимитами сжирает все покупки (Wall).
-        // Если Score > 0 (алгоритм хочет купить), мы должны ударить его по рукам (снизить reliability).
-        if (priceRet <= 0 && features.dCVD > 0 && score > 0.1) {
-            tags.push('hidden_supply_wall'); // Warning tag
-            reliability -= 0.25; // Снижаем уверенность в лонге!
+        // SCENARIO 1: HIDDEN SELLING WALL (Absorption)
+        // CVD is rising (buying), but Price is falling or flat.
+        // Limit sellers are absorbing market buys.
+        if (features.dCVD > 0 && priceRet <= 0.0002 && isSignificantDelta) {
+            tags.push('hidden_selling_wall');
+            
+            // Override score to SHORT
+            score = -0.85; 
+            reliability = 0.9; // Very high confidence pattern
         }
 
-        // Сценарий 2: CVD падает (продают), но цена растет/стоит.
-        // Лимитный покупатель держит уровень.
-        // Если Score < 0 (алгоритм хочет продать), снижаем уверенность.
-        else if (priceRet >= 0 && features.dCVD < 0 && score < -0.1) {
-            tags.push('hidden_demand_wall'); // Warning tag
-            reliability -= 0.25; // Снижаем уверенность в шорте!
+        // SCENARIO 2: HIDDEN BUYING WALL (Absorption)
+        // CVD is falling (selling), but Price is rising or flat.
+        // Limit buyers are absorbing market sells.
+        else if (features.dCVD < 0 && priceRet >= -0.0002 && isSignificantDelta) {
+            tags.push('hidden_buying_wall');
+            
+            // Override score to LONG
+            score = 0.85;
+            reliability = 0.9;
         }
 
-        // --- CONVERGENCE (Подтверждение) ---
-        // Если цена и CVD идут в одну сторону и движение значимое
+        // SCENARIO 3: CONVERGENCE (Confirmation)
         else if (Math.sign(priceRet) === Math.sign(features.dCVD) &&
             Math.abs(priceRet) > 0.001 &&
             Math.abs(features.dCVD) > effectiveStd * 0.5) {
             tags.push('flow_price_aligned');
             reliability += 0.15;
+            // Keep calculated score
         }
 
-        // Volume Check
+        // Volume checks
         if (features.volZ > 2.0) {
             tags.push('high_volume_significance');
             reliability += 0.1;
@@ -110,9 +104,7 @@ export class OrderflowModule extends BaseModule {
             reliability -= 0.1;
         }
 
-        // FIX #3: Clamp reliability [0, 1]
         reliability = clamp(reliability, 0.1, 1.0);
-
         return this.createOutput(score, reliability, tags);
     }
 
@@ -120,7 +112,7 @@ export class OrderflowModule extends BaseModule {
         if (values.length < 2) return 0;
         const mean = values.reduce((a, b) => a + b, 0) / values.length;
         const sumSqDiff = values.reduce((sum, val) => sum + (val - mean) ** 2, 0);
-        return Math.sqrt(sumSqDiff / (values.length - 1)); // Sample StdDev
+        return Math.sqrt(sumSqDiff / (values.length - 1));
     }
 
     reset(): void {

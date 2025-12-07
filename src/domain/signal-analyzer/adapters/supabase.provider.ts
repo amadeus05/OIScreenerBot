@@ -65,6 +65,38 @@ export class SupabaseDataProvider {
     }
 
     /**
+     * Retry operation with exponential backoff
+     */
+    private async withRetry<T>(operation: () => Promise<T>, maxRetries: number = 3, context: string = ''): Promise<T> {
+        let lastError: any;
+
+        for (let i = 0; i < maxRetries; i++) {
+            try {
+                return await operation();
+            } catch (error: any) {
+                lastError = error;
+                const isNetworkError = error.message?.includes('fetch failed')
+                    || error.message?.includes('SocketError')
+                    || error.message?.includes('ECONNRESET');
+
+                if (!isNetworkError && i < maxRetries - 1) {
+                    // If it's not a network error, we might not want to retry, 
+                    // but for now let's retry on everything except explicit auth errors if we wanted
+                    // For safety, let's keep retrying as Supabase JS client can throw various errors
+                }
+
+                if (i === maxRetries - 1) break;
+
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                this.logger.warn(`Retry ${i + 1}/${maxRetries} for ${context} due to error: ${error.message || error}. Waiting ${delay.toFixed(0)}ms`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        throw lastError;
+    }
+
+    /**
      * Check if Supabase is configured
      */
     isConfigured(): boolean {
@@ -81,12 +113,14 @@ export class SupabaseDataProvider {
         try {
             const client = this.getClient();
 
-            const { data, error } = await client
-                .from('candles')
-                .select('*')
-                .eq('symbol', symbol)
-                .order('ts', { ascending: false })
-                .limit(limit);
+            const { data, error } = await this.withRetry(async () => {
+                return await client
+                    .from('candles')
+                    .select('*')
+                    .eq('symbol', symbol)
+                    .order('ts', { ascending: false })
+                    .limit(limit);
+            }, 3, `getHistory(${symbol})`);
 
             if (error) {
                 this.logger.error(`Supabase query error for ${symbol}:`, error);
@@ -124,12 +158,14 @@ export class SupabaseDataProvider {
             // Workaround: Fetch recent records (last hour) to get variety of symbols
             const oneHourAgo = Date.now() - (60 * 60 * 1000);
 
-            const { data, error } = await client
-                .from('candles')
-                .select('symbol')
-                .gte('ts', oneHourAgo)
-                .order('ts', { ascending: false })
-                .limit(10000);
+            const { data, error } = await this.withRetry(async () => {
+                return await client
+                    .from('candles')
+                    .select('symbol')
+                    .gte('ts', oneHourAgo)
+                    .order('ts', { ascending: false })
+                    .limit(10000);
+            }, 3, 'getAvailableSymbols');
 
             if (error) {
                 this.logger.error('Error fetching symbols from Supabase:', error);
@@ -157,13 +193,15 @@ export class SupabaseDataProvider {
 
             this.logger.debug(`hasEnoughData: Checking ${symbol}, min=${minCandles}`);
 
-            const { count, error } = await client
-                .from('candles')
-                .select('*', { count: 'exact', head: true })
-                .eq('symbol', symbol);
+            const { count, error } = await this.withRetry(async () => {
+                return await client
+                    .from('candles')
+                    .select('*', { count: 'exact', head: true })
+                    .eq('symbol', symbol);
+            }, 3, `hasEnoughData(${symbol})`);
 
             if (error) {
-                this.logger.error(`hasEnoughData error for ${symbol}:`, error);
+                this.logger.error(`hasEnoughData error for ${symbol}: ${error.message} (Code: ${error.code})`, error);
                 return false;
             }
 

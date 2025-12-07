@@ -11,7 +11,7 @@ export interface AggregationResult {
 }
 
 export class DecisionAggregator {
-    private readonly weights: ModuleWeights;
+    private weights: ModuleWeights; // Removed readonly to allow updates
     private readonly threshold: number;
 
     constructor(
@@ -21,6 +21,11 @@ export class DecisionAggregator {
         this.weights = weights;
         this.threshold = threshold;
     }
+
+    public setWeights(weights: ModuleWeights): void {
+        this.weights = weights;
+    }
+
 
     aggregate(moduleOutputs: ModuleOutput[]): AggregationResult {
         if (moduleOutputs.length === 0) {

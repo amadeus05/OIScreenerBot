@@ -77,13 +77,23 @@ export class EntryCalculator {
         // Цель 2: Противоположный канал (2 ATR)
         const distSl = Math.abs(entryPrice - sl);
         
-        // TP1: Minimal 1.5R or EMA Slow cross
-        let tp1 = entryPrice + (direction * distSl * 1.5);
+        // --- FIX: Уменьшаем жадность (Front-running) ---
+        // Умножаем дистанцию на 0.9 (или 0.95). 
+        // Мы отдаем 10% потенциальной прибыли рынку, но ГАРАНТИРУЕМ исполнение.
+        const greedFactor = 0.9; 
+
+        // Рассчитываем идеальную цель
+        const idealTargetDist = distSl * 1.5;
+
+        // TP1: Minimal 1.5R or EMA Slow cross (с учетом greedFactor)
+        let tp1 = entryPrice + (direction * idealTargetDist * greedFactor);
         
         // Если EMA Slow выгоднее чем 1.5R, ставим её (возврат к средней)
         const distToMean = (features.emaSlow - entryPrice) * direction;
         if (distToMean > distSl * 1.5) {
-            tp1 = features.emaSlow;
+            // Для EMA Slow также применяем greedFactor
+            const emaTargetDist = Math.abs(features.emaSlow - entryPrice);
+            tp1 = entryPrice + (direction * emaTargetDist * greedFactor);
         }
 
         const tp2 = entryPrice + (direction * distSl * 3.0); // Runner

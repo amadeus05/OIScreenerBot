@@ -33,7 +33,7 @@ export class PumpScoutBot {
       this.triggerEngine.start();
 
       this.commandHandler.initialize();
-      
+
       // Start signal scanner
       this.signalScanner.start();
       this.signalVerifier.start();

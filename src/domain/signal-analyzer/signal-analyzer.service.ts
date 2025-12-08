@@ -20,6 +20,7 @@ import {
     DecisionAggregator,
     ConfidenceCalculator,
     EntryCalculator,
+    RegimeSupervisor
 } from './services';
 import {
     MomentumModule,
@@ -44,6 +45,7 @@ export class SignalAnalyzerService {
     private readonly decisionAggregator: DecisionAggregator;
     private readonly confidenceCalculator: ConfidenceCalculator;
     private readonly entryCalculator: EntryCalculator;
+    private readonly regimeSupervisor: RegimeSupervisor;
 
     // Modules
     private readonly modules: BaseModule[];
@@ -75,6 +77,8 @@ export class SignalAnalyzerService {
             new LiquidationModule(),
             this.levelsModule,
         ];
+        this.decisionAggregator = new DecisionAggregator(config.weights, config.decision.threshold);
+        this.regimeSupervisor = new RegimeSupervisor(config.weights);
 
         this.logger.info('SignalAnalyzerService initialized');
     }
@@ -108,6 +112,16 @@ export class SignalAnalyzerService {
             // 4. Compute features for 1m timeframe (primary)
             const featureEngine = this.getOrCreateFeatureEngine(symbol);
             const features = featureEngine.computeFeatures(bars1m);
+
+            // [NEW] 4.1. Determine Market Regime & Adjust Weights
+            const currentPrice = bars1m[bars1m.length - 1].c;
+            const regimeAnalysis = this.regimeSupervisor.analyze(features, currentPrice);
+
+            // Динамически обновляем веса в агрегаторе перед принятием решения
+            this.decisionAggregator.setWeights(regimeAnalysis.adjustedWeights);
+
+            // Логируем смену режима (полезно для отладки)
+            // this.logger.debug(`Market Regime: ${regimeAnalysis.regime} (${regimeAnalysis.reason})`);
 
             // 5. Run all analysis modules
             const moduleOutputs = this.runModules(features, bars1m);

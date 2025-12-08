@@ -71,8 +71,8 @@ export class OrderflowModule extends BaseModule {
             tags.push('hidden_selling_wall');
             
             // Override score to SHORT
-            score = -0.85; 
-            reliability = 0.9; // Very high confidence pattern
+            score = -0.45; 
+            reliability = 0.5; // Very high confidence pattern
         }
 
         // SCENARIO 2: HIDDEN BUYING WALL (Absorption)
@@ -82,8 +82,8 @@ export class OrderflowModule extends BaseModule {
             tags.push('hidden_buying_wall');
             
             // Override score to LONG
-            score = 0.85;
-            reliability = 0.9;
+            score = 0.45;
+            reliability = 0.5;
         }
 
         // SCENARIO 3: CONVERGENCE (Confirmation)

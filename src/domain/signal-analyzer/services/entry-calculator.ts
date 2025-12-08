@@ -36,7 +36,7 @@ export class EntryCalculator {
         // Для стратегии разворота (Mean Reversion), если уверенность высокая - бьем по рынку,
         // так как цена может быстро улететь от дисбаланса.
         // Если уверенность средняя - пытаемся поймать ретест EMA.
-        const isUrgent = confidence >= 0.6; 
+        const isUrgent = confidence >= 0.4; 
         
         let entryPrice = currentBar.c;
         let entryType: EntryType = 'market';
@@ -63,8 +63,8 @@ export class EntryCalculator {
         const recentLow = Math.min(...bars.slice(-lookback).map(b => b.l));
         
         let sl = isLong 
-            ? Math.min(recentLow, currentBar.l) - (features.atr * 0.5) 
-            : Math.max(recentHigh, currentBar.h) + (features.atr * 0.5);
+            ? Math.min(recentLow, currentBar.l) - (features.atr * 1.5) 
+            : Math.max(recentHigh, currentBar.h) + (features.atr * 1.5);
 
         // Safety check: Don't let SL be closer than 0.2% (noise)
         const minSlDist = entryPrice * 0.002;

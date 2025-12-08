@@ -8,6 +8,8 @@ import * as path from 'path';
 import { Logger } from '../../shared/logger';
 import { SignalAnalyzerService, SignalResult, SupabaseDataProvider } from '../../domain/signal-analyzer';
 import { TelegramBotService } from '../telegram/telegram.bot';
+import { IAnalizationResultRepository } from '../../domain/interfaces/repositories.interface';
+import { AnalizationResult } from '../../domain/entities/analization-result.entity';
 
 export interface SignalScannerConfig {
     /** Scan interval in milliseconds (default: 60000 = 1 minute) */
@@ -36,6 +38,7 @@ export class SignalScannerService {
     private readonly signalAnalyzer: SignalAnalyzerService;
     private readonly supabaseProvider: SupabaseDataProvider;
     private readonly telegramBot: TelegramBotService;
+    private readonly analizationResultRepository: IAnalizationResultRepository;
 
     private scanTimer: NodeJS.Timeout | null = null;
     private isRunning = false;
@@ -48,11 +51,13 @@ export class SignalScannerService {
     constructor(
         signalAnalyzer: SignalAnalyzerService,
         telegramBot: TelegramBotService,
+        analizationResultRepository: IAnalizationResultRepository, // Add this parameter
         config: Partial<SignalScannerConfig> = {}
     ) {
         this.config = { ...DEFAULT_CONFIG, ...config };
         this.signalAnalyzer = signalAnalyzer;
         this.telegramBot = telegramBot;
+        this.analizationResultRepository = analizationResultRepository; // Initialize
         this.supabaseProvider = new SupabaseDataProvider();
 
         // Ensure log directory exists
@@ -145,7 +150,8 @@ export class SignalScannerService {
                             signalCount++;
                             this.logResult(result);
                             await this.sendNotification(result);
-                        }
+                            await this.saveToDatabase(result);
+                        }                        
                     }
                 }
             }
@@ -241,9 +247,9 @@ export class SignalScannerService {
         const modules = `OF:${result.modules.orderflow.toFixed(2)} OI:${result.modules.oi.toFixed(2)} M:${result.modules.momentum.toFixed(2)} L:${result.modules.levels.toFixed(2)} Lq:${result.modules.liquidations.toFixed(2)}`;
 
         // Entry/SL/TP info
-        const entry = `E:${result.entryPrice.toFixed(4)}`;
-        const sl = `SL:${result.sl.toFixed(4)}`;
-        const tp = result.tp[0] ? `TP:${result.tp[0].toFixed(4)}` : 'TP:-';
+        const entry = `E:${result.entryPrice.toFixed(6)}`;
+        const sl = `SL:${result.sl.toFixed(6)}`;
+        const tp = result.tp[0] ? `TP:${result.tp[0].toFixed(6)}` : 'TP:-';
 
         return `${ts} | ${result.symbol.padEnd(10)} | ${result.action.padEnd(5)} | conf=${result.confidence.toFixed(2)} | ${entry} ${sl} ${tp} | ${modules} | ${result.reasonTags.slice(0, 3).join(',')}`;
     }
@@ -300,6 +306,47 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
 
 <i>Auto Signal Scanner</i>
         `.trim();
+    }
+
+    /**
+     * Save analysis result to database
+     */
+    private async saveToDatabase(signalResult: SignalResult): Promise<void> {
+        try {
+            const analizationResult = this.mapToAnalizationResult(signalResult);
+            await this.analizationResultRepository.save(analizationResult);
+            this.logger.debug(`Saved analysis result for ${signalResult.symbol} to database`);
+        } catch (error) {
+            this.logger.error(`Error saving analysis result for ${signalResult.symbol}:`, error);
+        }
+    }
+
+    /**
+     * Map SignalResult to AnalizationResult entity
+     */
+    private mapToAnalizationResult(signalResult: SignalResult): AnalizationResult {
+        const result = new AnalizationResult();
+        
+        result.ts = new Date();
+        result.symbol = signalResult.symbol;
+        result.action = signalResult.action;
+        result.entryType = signalResult.entryType;
+        result.entryPrice = signalResult.entryPrice;
+        result.sl = signalResult.sl;
+        result.tp = signalResult.tp;
+        result.tpPct = signalResult.tpPct;
+        result.horizonMin = signalResult.horizonMin;
+        result.confidence = signalResult.confidence;
+        result.confidenceLevel = signalResult.confidenceLevel;
+        result.modules = signalResult.modules;
+        result.reasonTags = signalResult.reasonTags;
+        result.riskPct = signalResult.riskPct;
+        result.meta = {
+            rawScore: signalResult.meta.rawScore,
+            moduleAgreement: signalResult.meta.moduleAgreement
+        };
+
+        return result;
     }
 
     /**

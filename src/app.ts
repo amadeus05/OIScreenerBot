@@ -5,6 +5,7 @@ import { TelegramBotService } from './infrastructure/telegram/telegram.bot';
 import { ITriggerRepository } from './domain/interfaces/repositories.interface';
 import { CommandHandler } from './presentation/telegram/handlers/command.handler';
 import { SignalScannerService } from './infrastructure/services/signal-scanner.service';
+import { SignalVerifierService } from './infrastructure/services/signal-verifier.service';
 
 @Injectable()
 export class PumpScoutBot {
@@ -17,6 +18,7 @@ export class PumpScoutBot {
     @Inject('ITriggerRepository') private readonly triggerRepository: ITriggerRepository,
     private readonly commandHandler: CommandHandler,
     private readonly signalScanner: SignalScannerService,
+    private readonly signalVerifier: SignalVerifierService
   ) { }
 
   public async start(): Promise<void> {
@@ -31,9 +33,10 @@ export class PumpScoutBot {
       this.triggerEngine.start();
 
       this.commandHandler.initialize();
-
+      
       // Start signal scanner
       this.signalScanner.start();
+      this.signalVerifier.start();
 
       this.logger.info('Pump Scout Bot started successfully!');
     } catch (error) {

@@ -3,6 +3,7 @@ import { DIContainer } from './shared/container';
 import { SignalRepository } from './infrastructure/repositories/signal.repository';
 import { TriggerRepository } from './infrastructure/repositories/trigger.repository';
 import { MarketDataRepository } from './infrastructure/repositories/market-data.repository';
+import { AnalizationResultRepository } from '@infrastructure/repositories/analization-result.repository';
 
 // Services
 import { UptimeService } from './infrastructure/services/uptime.service';
@@ -10,6 +11,7 @@ import { NotificationService } from './infrastructure/services/notification.serv
 import { TriggerEngineService } from './infrastructure/services/trigger-engine.service';
 import { TechnicalAnalysisService } from './infrastructure/services/technical-analysis.service';
 import { SignalScannerService } from './infrastructure/services/signal-scanner.service';
+import { SignalVerifierService } from './infrastructure/services/signal-verifier.service';
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 
@@ -34,6 +36,7 @@ export function registerDependencies(): void {
   container.bind('ITriggerRepository', () => new TriggerRepository());
   container.bind('ISignalRepository', () => new SignalRepository());
   container.bind('IMarketDataRepository', () => new MarketDataRepository());
+  container.bind('IAnalizationResultRepository', () => new AnalizationResultRepository());
 
   // --- 2. Market Data Infrastructure ---
   const gateway = new MarketDataGatewayService(container.get('IMarketDataRepository'));
@@ -89,7 +92,12 @@ export function registerDependencies(): void {
   container.bind(SignalScannerService, () => new SignalScannerService(
     container.get(SignalAnalyzerService),
     container.get(TelegramBotService),
+    container.get('IAnalizationResultRepository'),
   ));
+
+  container.bind(SignalVerifierService, () => new SignalVerifierService(
+    container.get('IAnalizationResultRepository')
+  ))
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(
     container.get('IMarketDataGateway'),
@@ -98,5 +106,6 @@ export function registerDependencies(): void {
     container.get('ITriggerRepository'),
     container.get(CommandHandler),
     container.get(SignalScannerService),
+    container.get(SignalVerifierService)
   ));
 }

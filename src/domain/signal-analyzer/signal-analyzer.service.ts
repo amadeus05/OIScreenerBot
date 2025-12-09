@@ -67,6 +67,7 @@ export class SignalAnalyzerService {
         );
         this.confidenceCalculator = new ConfidenceCalculator(config.decision.threshold);
         this.entryCalculator = new EntryCalculator();
+        this.regimeSupervisor = new RegimeSupervisor(config.weights);
 
         // Initialize modules
         this.levelsModule = new LevelsModule();
@@ -77,8 +78,6 @@ export class SignalAnalyzerService {
             new LiquidationModule(),
             this.levelsModule,
         ];
-        this.decisionAggregator = new DecisionAggregator(config.weights, config.decision.threshold);
-        this.regimeSupervisor = new RegimeSupervisor(config.weights);
 
         this.logger.info('SignalAnalyzerService initialized');
     }
@@ -90,7 +89,7 @@ export class SignalAnalyzerService {
      * @returns Signal result with trade recommendation
      */
     analyze(symbol: string, bars: BarData[]): SignalResult {
-        if (bars.length < 20) {
+        if (bars.length < 50) {
             this.logger.warn(`Not enough bars for analysis: ${bars.length} < 20`);
             return this.noTradeResult(symbol, 'Insufficient data');
         }
@@ -113,25 +112,25 @@ export class SignalAnalyzerService {
             const featureEngine = this.getOrCreateFeatureEngine(symbol);
             const features = featureEngine.computeFeatures(bars1m);
 
-            // [NEW] 4.1. Determine Market Regime & Adjust Weights
+            // 4.1. Determine Market Regime & Adjust Weights
             const currentPrice = bars1m[bars1m.length - 1].c;
             const regimeAnalysis = this.regimeSupervisor.analyze(features, currentPrice);
 
             // Динамически обновляем веса в агрегаторе перед принятием решения
             this.decisionAggregator.setWeights(regimeAnalysis.adjustedWeights);
 
-            // Логируем смену режима (полезно для отладки)
-            // this.logger.debug(`Market Regime: ${regimeAnalysis.regime} (${regimeAnalysis.reason})`);
-
             // 5. Run all analysis modules
             const moduleOutputs = this.runModules(features, bars1m);
 
             // 6. Aggregate module scores
-            const aggregation = this.decisionAggregator.aggregate(moduleOutputs);
+            // [FIX] Передаем features вторым аргументом для "Умной фильтрации" (Veto)
+            const aggregation = this.decisionAggregator.aggregate(moduleOutputs, features);
 
             // 7. If NO_TRADE, return early
             if (aggregation.action === 'NO_TRADE') {
-                return this.noTradeResult(symbol, 'Below threshold', aggregation.rawScore, moduleOutputs);
+                // Если был VetoReason, добавляем его в причину
+                const reason = aggregation.vetoReason ? `Veto: ${aggregation.vetoReason}` : 'Below threshold';
+                return this.noTradeResult(symbol, reason, aggregation.rawScore, moduleOutputs);
             }
 
             // 8. Calculate confidence with penalties
@@ -148,15 +147,23 @@ export class SignalAnalyzerService {
             }
 
             // 10. Calculate entry/SL/TP
+            // [FIX] Передаем режим рынка (regime) для адаптивных стопов и тейков
             const entryResult = this.entryCalculator.calculate(
                 aggregation.action,
                 bars1m,
                 features,
-                confidenceResult.confidence
+                confidenceResult.confidence,
+                regimeAnalysis.regime
             );
 
             // 11. Collect all tags
             const reasonTags = this.decisionAggregator.collectReasonTags(moduleOutputs);
+            
+            // Добавляем теги режима и причины Veto/Flip
+            reasonTags.push(`REGIME_${regimeAnalysis.regime}`);
+            if (aggregation.vetoReason) {
+                reasonTags.push(aggregation.vetoReason);
+            }
             if (confidenceResult.penaltyReasons.length > 0) {
                 reasonTags.push(...confidenceResult.penaltyReasons);
             }
@@ -184,10 +191,11 @@ export class SignalAnalyzerService {
                     atr: features.atr,
                     volZ: features.volZ,
                     flowImb: features.flowImb,
+                    regime: regimeAnalysis.regime // Полезно для отладки
                 },
             };
 
-            this.logger.debug(`Signal generated for ${symbol}: ${result.action} @ ${result.confidence.toFixed(2)}`);
+            this.logger.debug(`Signal generated for ${symbol}: ${result.action} @ ${result.confidence.toFixed(2)} [${regimeAnalysis.regime}]`);
             return result;
 
         } catch (error) {

@@ -1,6 +1,6 @@
 import { TradeAction, EntryType, BarData, AggregatedBar, Features } from '../types';
 import { DEFAULT_CONFIG } from '../types/config';
-import { clamp } from '../utils/rolling-stats';
+import { MarketRegime } from './regime-supervisor'; // <-- Импортируем типы
 
 export interface EntryResult {
     entryType: EntryType;
@@ -22,7 +22,8 @@ export class EntryCalculator {
         action: TradeAction,
         bars: (BarData | AggregatedBar)[],
         features: Features,
-        confidence: number
+        confidence: number,
+        regime: MarketRegime = 'RANGING' // <-- Добавляем аргумент
     ): EntryResult {
         if (action === 'NO_TRADE' || bars.length < 10) {
             return this.emptyResult();
@@ -32,78 +33,96 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // 1. ENTRY LOGIC
-        // Для стратегии разворота (Mean Reversion), если уверенность высокая - бьем по рынку,
-        // так как цена может быстро улететь от дисбаланса.
-        // Если уверенность средняя - пытаемся поймать ретест EMA.
-        const isUrgent = confidence >= 0.4; 
+        // 1. АДАПТАЦИЯ КОЭФФИЦИЕНТОВ ПОД РЕЖИМ (Пункт 3 из ревью)
+        let slMultiplier = 1.5; // База
+        let tp1Multiplier = 1.5;
+        let tp2Multiplier = 3.0;
+
+        switch (regime) {
+            case 'TRENDING':
+                // В тренде стоп можно поближе (тренд защищает), а тейк - в космос
+                slMultiplier = 1.2; 
+                tp1Multiplier = 2.0; 
+                tp2Multiplier = 5.0; // Let winners run!
+                break;
+            case 'VOLATILE':
+                // В волатильности (новости/сквизы) стоп должен быть широким
+                slMultiplier = 2.0; 
+                tp1Multiplier = 1.2; // Быстро забираем свое
+                tp2Multiplier = 2.5;
+                break;
+            case 'RANGING':
+            default:
+                // В боковике стандарт
+                slMultiplier = 1.5;
+                tp1Multiplier = 1.5;
+                tp2Multiplier = 3.0;
+                break;
+        }
+
+        // 2. ВХОД (ENTRY)
+        const isUrgent = confidence >= 0.6; // Вернул 0.6 (исправление ошибки из прошлого чата)
         
         let entryPrice = currentBar.c;
         let entryType: EntryType = 'market';
 
         if (!isUrgent) {
             entryType = 'limit';
-            // Пытаемся взять от emaFast, если она близко, иначе просто небольшой отступ
             const smartPullback = features.emaFast;
-            // Проверка, что emaFast не слишком далеко (> 0.5% цены), иначе ордер никогда не исполнится
             const distToEma = Math.abs(currentBar.c - smartPullback) / currentBar.c;
             
-            if (distToEma < 0.005) {
+            // Если EMA близко, пробуем от нее. Если далеко - просто отступ.
+            if (distToEma < 0.008) { // Чуть расширил окно для лимитки
                 entryPrice = smartPullback;
             } else {
-                // Фоллбэк: 0.1 ATR отступ
                 entryPrice = currentBar.c - (direction * features.atr * 0.1);
             }
         }
 
-        // 2. STOP LOSS (TIGHT)
-        // Для разворотов стоп должен быть коротким. Сразу за экстремумом.
+        // 3. СТОП-ЛОСС (Адаптивный)
         const lookback = 10;
         const recentHigh = Math.max(...bars.slice(-lookback).map(b => b.h));
         const recentLow = Math.min(...bars.slice(-lookback).map(b => b.l));
         
         let sl = isLong 
-            ? Math.min(recentLow, currentBar.l) - (features.atr * 1.5) 
-            : Math.max(recentHigh, currentBar.h) + (features.atr * 1.5);
+            ? Math.min(recentLow, currentBar.l) - (features.atr * slMultiplier) 
+            : Math.max(recentHigh, currentBar.h) + (features.atr * slMultiplier);
 
-        // Safety check: Don't let SL be closer than 0.2% (noise)
         const minSlDist = entryPrice * 0.002;
         if (Math.abs(entryPrice - sl) < minSlDist) {
             sl = entryPrice - (direction * minSlDist);
         }
 
-        // 3. TAKE PROFIT (Mean Reversion Targets)
-        // Цель 1: Возврат к средней (EMA Slow)
-        // Цель 2: Противоположный канал (2 ATR)
+        // 4. ТЕЙК-ПРОФИТ (Адаптивный)
         const distSl = Math.abs(entryPrice - sl);
-        
-        // --- FIX: Уменьшаем жадность (Front-running) ---
-        // Умножаем дистанцию на 0.9 (или 0.95). 
-        // Мы отдаем 10% потенциальной прибыли рынку, но ГАРАНТИРУЕМ исполнение.
-        const greedFactor = 0.9; 
+        const greedFactor = 0.95; // 0.9 было слишком щедро, 0.95 оптимально
 
-        // Рассчитываем идеальную цель
-        const idealTargetDist = distSl * 1.5;
-
-        // TP1: Minimal 1.5R or EMA Slow cross (с учетом greedFactor)
-        let tp1 = entryPrice + (direction * idealTargetDist * greedFactor);
+        // TP1
+        let tp1 = entryPrice + (direction * distSl * tp1Multiplier * greedFactor);
         
-        // Если EMA Slow выгоднее чем 1.5R, ставим её (возврат к средней)
-        const distToMean = (features.emaSlow - entryPrice) * direction;
-        if (distToMean > distSl * 1.5) {
-            // Для EMA Slow также применяем greedFactor
-            const emaTargetDist = Math.abs(features.emaSlow - entryPrice);
-            tp1 = entryPrice + (direction * emaTargetDist * greedFactor);
+        // В Тренде мы НЕ ограничиваем TP1 уровнем EMA Slow, мы хотим пробить его.
+        // В Боковике (Ranging) мы уважаем среднюю.
+        if (regime === 'RANGING') {
+            const distToMean = (features.emaSlow - entryPrice) * direction;
+            if (distToMean > distSl * 1.0) { // Если до средней есть хотя бы 1R
+                // Ставим тейк перед средней
+                const emaTarget = features.emaSlow - (direction * features.atr * 0.1);
+                // Выбираем что ближе: расчетный TP1 или EMA
+                if (Math.abs(entryPrice - emaTarget) < Math.abs(entryPrice - tp1)) {
+                    tp1 = emaTarget;
+                }
+            }
         }
 
-        const tp2 = entryPrice + (direction * distSl * 3.0); // Runner
+        // TP2 (Runner)
+        const tp2 = entryPrice + (direction * distSl * tp2Multiplier);
 
         const tp = [tp1, tp2];
         const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
 
-        // 4. VALIDATION
+        // 5. VALIDATION
         if (tpPct[0] < this.MIN_PROFIT_PCT * 100) {
-             return this.invalidResult('RR too low (Target too close)');
+             return { ...this.emptyResult(), isValid: false, reason: 'RR too low' };
         }
 
         return {
@@ -112,17 +131,13 @@ export class EntryCalculator {
             sl,
             tp,
             tpPct,
-            horizonMin: 15, // Reversals are usually quick
-            riskPct: this.positionConfig.baseRiskPct * confidence,
+            horizonMin: regime === 'VOLATILE' ? 5 : 15, // На сквизах все быстро
+            riskPct: this.positionConfig.baseRiskPct * confidence, // Пока оставим так (пункт 1 отложили)
             isValid: true
         };
     }
 
     private emptyResult(): EntryResult {
         return { entryType: 'market', entryPrice: 0, sl: 0, tp: [], tpPct: [], horizonMin: 0, riskPct: 0, isValid: false };
-    }
-
-    private invalidResult(reason: string): EntryResult {
-        return { ...this.emptyResult(), isValid: false, reason };
     }
 }

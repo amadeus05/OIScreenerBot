@@ -64,10 +64,14 @@ export class OrderflowModule extends BaseModule {
         const isSignificantDelta = Math.abs(features.dCVD) > effectiveStd * 1.5;
         const isSignificantVolume = features.volZ > 1.0;
 
+
+        const flatThreshold = features.atr > 0 
+            ? (features.atr * 0.1) / currentBar.c 
+            : 0.0005;
         // SCENARIO 1: HIDDEN SELLING WALL (Absorption)
         // CVD is rising (buying), but Price is falling or flat.
         // Limit sellers are absorbing market buys.
-        if (features.dCVD > 0 && priceRet <= 0.0002 && isSignificantDelta) {
+        if (features.dCVD > 0 && priceRet <= flatThreshold && isSignificantDelta) {
             tags.push('hidden_selling_wall');
             
             // Override score to SHORT
@@ -78,7 +82,7 @@ export class OrderflowModule extends BaseModule {
         // SCENARIO 2: HIDDEN BUYING WALL (Absorption)
         // CVD is falling (selling), but Price is rising or flat.
         // Limit buyers are absorbing market sells.
-        else if (features.dCVD < 0 && priceRet >= -0.0002 && isSignificantDelta) {
+        else if (features.dCVD < 0 && priceRet >= -flatThreshold && isSignificantDelta) {
             tags.push('hidden_buying_wall');
             
             // Override score to LONG

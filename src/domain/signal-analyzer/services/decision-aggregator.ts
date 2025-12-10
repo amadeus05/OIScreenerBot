@@ -1,14 +1,15 @@
 import { ModuleOutput, TradeAction, ModuleName, Features } from '../types';
 import { DEFAULT_CONFIG, ModuleWeights } from '../types/config';
+import { MarketContext } from '../types/context'; // Импортируем контекст
 
 export interface AggregationResult {
-    rawScore: number;         // Взвешенный итог [-1, 1]
+    rawScore: number;
     action: TradeAction;
-    moduleAgreement: number;  // [0, 1] % веса модулей, которые активно согласны
-    conflictLevel: number;    // [0, 1] Насколько модули противоречат друг другу
+    moduleAgreement: number;
+    conflictLevel: number;
     weightedReliability: number;
-    participatingWeight: number; // Абсолютная сумма весов, участвовавших в решении
-    vetoReason?: string;      // Причина отмены или переворота сделки
+    participatingWeight: number;
+    vetoReason?: string;
 }
 
 export class DecisionAggregator {
@@ -30,28 +31,28 @@ export class DecisionAggregator {
     /**
      * Агрегирует сигналы, применяет логику переворота (Flip) и фильтрации (Veto)
      */
-    aggregate(moduleOutputs: ModuleOutput[], features: Features): AggregationResult {
+    aggregate(
+        moduleOutputs: ModuleOutput[], 
+        features: Features, 
+        context?: MarketContext // Опциональный контекст (чтобы не ломать старые тесты)
+    ): AggregationResult {
+        
         if (moduleOutputs.length === 0) {
             return this.createEmptyResult();
         }
 
         let weightedSum = 0;
         let totalReliabilityWeight = 0;
-
-        // Вектора для расчета конфликта
         let sumPositive = 0;
         let sumNegative = 0;
 
-        // ---------------------------------------------------------------------
-        // 1. БАЗОВЫЙ РАСЧЕТ (ВЗВЕШЕННАЯ СУММА)
-        // ---------------------------------------------------------------------
+        // 1. БАЗОВЫЙ РАСЧЕТ
         for (const output of moduleOutputs) {
             const weight = this.weights[output.name] || 0;
             const effectiveWeight = weight * output.reliability;
 
             if (effectiveWeight === 0) continue;
 
-            // Если модуль "воздержался" (score ~ 0), учитываем лишь малую часть его веса
             if (Math.abs(output.score) < 0.01) {
                 totalReliabilityWeight += effectiveWeight * 0.1;
             } else {
@@ -71,19 +72,12 @@ export class DecisionAggregator {
             action = rawScore > 0 ? 'LONG' : 'SHORT';
         }
 
-        // ---------------------------------------------------------------------
-        // 2. OPPORTUNISTIC FLIP LOGIC (ПРЕВРАЩАЕМ ОШИБКИ В ПРИБЫЛЬ)
-        // Логика: Если мы пытаемся торговать ПРОТИВ сильного тренда без веской причины,
-        // мы не просто отменяем сделку, а ПЕРЕВОРАЧИВАЕМСЯ по тренду.
-        // ---------------------------------------------------------------------
-        
+        // 2. OPPORTUNISTIC FLIP LOGIC
         let vetoReason: string | undefined;
         let isFlipped = false;
 
         if (action !== 'NO_TRADE') {
             const momentumScore = this.getModuleScore(moduleOutputs, 'momentum');
-            
-            // Список тегов, которые разрешают контртренд (это "умные" развороты, их не трогаем)
             const reversalWhitelist = [
                 'resistance_SFP_rejection', 'support_SFP_rejection',
                 'short_squeeze_climax_reversal', 'long_cascade_climax_reversal',
@@ -92,46 +86,34 @@ export class DecisionAggregator {
             const tags = this.collectReasonTags(moduleOutputs);
             const isReversalSetup = tags.some(t => reversalWhitelist.includes(t));
 
-            // SCENARIO A: FLIP TO LONG (Исправление ошибки CUDIS/HBAR)
-            // Бот хочет ШОРТ (action=SHORT), но Тренд Вверх (EMA Fast > Slow) И Моментум положителен.
+            // FLIP TO LONG
             if (action === 'SHORT' && !isReversalSetup) {
                 if (features.emaFast > features.emaSlow && momentumScore > 0.15) {
-                    // Мы пытаемся шортить растущий рынок. Глупо.
-                    // Переворачиваемся в ЛОНГ на продолжение тренда!
                     action = 'LONG';
-                    rawScore = Math.abs(rawScore); // Делаем скор положительным
-                    vetoReason = 'FLIP_TREND_FOLLOW_LONG'; // Помечаем как особый тип входа
+                    rawScore = Math.abs(rawScore);
+                    vetoReason = 'FLIP_TREND_FOLLOW_LONG';
                     isFlipped = true;
-                    
-                    // Добавляем тег для логов
                     this.addTagToModule(moduleOutputs, 'momentum', 'AUTO_FLIP_LONG');
                 }
             }
-
-            // SCENARIO B: FLIP TO SHORT
-            // Бот хочет ЛОНГ, но Тренд Вниз И Моментум отрицателен.
+            // FLIP TO SHORT
             else if (action === 'LONG' && !isReversalSetup) {
                 if (features.emaFast < features.emaSlow && momentumScore < -0.15) {
                     action = 'SHORT';
                     rawScore = -Math.abs(rawScore);
                     vetoReason = 'FLIP_TREND_FOLLOW_SHORT';
                     isFlipped = true;
-                    
                     this.addTagToModule(moduleOutputs, 'momentum', 'AUTO_FLIP_SHORT');
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
         // 3. SMART SANITY CHECK (VETO LOGIC)
-        // Если мы не перевернулись, проверяем стандартные запреты.
-        // ---------------------------------------------------------------------
-
         if (action !== 'NO_TRADE' && !isFlipped) {
             const tags = this.collectReasonTags(moduleOutputs);
             const isLong = action === 'LONG';
             
-            // VETO 1: Не покупай в сопротивление / Не продавай в поддержку (если это не пробой)
+            // --- VETO 1-3: Существующие проверки ---
             if (isLong) {
                 if (tags.includes('near_resistance') && !tags.includes('resistance_breakout') && !tags.includes('volume_breakout')) {
                     action = 'NO_TRADE';
@@ -146,8 +128,6 @@ export class DecisionAggregator {
                 }
             }
 
-            // VETO 2: Фильтр мертвого рынка (как на DYDX)
-            // Запрещаем торговать пробои (breakout), если волатильность на нуле.
             if (tags.includes('dead_market')) {
                 const isBreakout = tags.includes('resistance_breakout') || tags.includes('support_breakdown');
                 if (isBreakout) {
@@ -157,40 +137,53 @@ export class DecisionAggregator {
                 }
             }
             
-            // VETO 3: Защита от глупого контртренда (если Flip не сработал, но тренд сильный)
-            // Просто блокируем сделку, чтобы не терять деньги.
-            if (!vetoReason) {
-                // Пытаемся шортить, а тренд явно вверх
-                if (!isLong && features.emaFast > features.emaSlow) {
-                    // Разрешаем только если это SFP (умный разворот)
-                    const isSFP = tags.includes('resistance_SFP_rejection');
-                    if (!isSFP) {
-                         action = 'NO_TRADE';
-                         rawScore = 0;
-                         vetoReason = 'VETO_TREND_MISMATCH';
-                    }
+            // --- VETO 4: FAKE BREAKOUT IN VOLATILITY ---
+            // Если режим VOLATILE (определяется супервайзером), мы торгуем только на ликвидациях.
+            // Но здесь мы не знаем режим напрямую (он в супервайзере). 
+            // Но мы можем проверить наличие ликвидаций в features.
+            if (tags.includes('resistance_breakout') || tags.includes('support_breakdown')) {
+                 if (features.volZ > 2.5 && !features.liquidationSignal) {
+                     // Высокая волатильность, пробой, но без ликвидаций -> Часто ловушка.
+                     // (Optional strict check)
+                 }
+            }
+
+            // === VETO 5: GLOBAL MARKET CONTEXT (УМНЫЙ ФИЛЬТР) ===
+            // Если контекст передан, используем его разрешения
+            if (context) {
+                if (action === 'LONG' && !context.permissions.allowLong) {
+                    // Исключение: Очень сильный SFP (разворот) иногда может сработать против тренда,
+                    // но для безопасности лучше следовать глобальному тренду.
+                    action = 'NO_TRADE';
+                    rawScore = 0;
+                    // Форматируем причину: VETO_GLOBAL_DOWNTREND или VETO_GLOBAL_PANIC_DUMP
+                    vetoReason = `VETO_GLOBAL_${context.permissions.reason.toUpperCase().replace(/\s+/g, '_')}`;
                 }
-                // Пытаемся лонговать, а тренд явно вниз
-                if (isLong && features.emaFast < features.emaSlow) {
-                    const isSFP = tags.includes('support_SFP_rejection');
-                    if (!isSFP) {
-                         action = 'NO_TRADE';
-                         rawScore = 0;
-                         vetoReason = 'VETO_TREND_MISMATCH';
+
+                if (action === 'SHORT' && !context.permissions.allowShort) {
+                    action = 'NO_TRADE';
+                    rawScore = 0;
+                    vetoReason = `VETO_GLOBAL_${context.permissions.reason.toUpperCase().replace(/\s+/g, '_')}`;
+                }
+
+                // Доп. защита при высоком риске
+                if (context.riskLevel === 'HIGH' || context.riskLevel === 'EXTREME') {
+                    if (action !== 'NO_TRADE') {
+                        // При высоком риске требуем, чтобы сигнал был ОЧЕНЬ сильным (> 0.75)
+                        if (Math.abs(rawScore) < 0.75) {
+                            action = 'NO_TRADE';
+                            rawScore = 0;
+                            vetoReason = 'VETO_HIGH_RISK_WEAK_SIGNAL';
+                        }
                     }
                 }
             }
         }
 
-        // ---------------------------------------------------------------------
         // 4. РАСЧЕТ ИТОГОВЫХ МЕТРИК
-        // ---------------------------------------------------------------------
-
-        // Agreement: Доля веса модулей, согласных с финальным решением
         let agreeingWeight = 0;
         const finalSign = Math.sign(rawScore);
         const totalFlux = sumPositive + sumNegative;
-
         if (totalReliabilityWeight > 0 && finalSign !== 0) {
             for (const output of moduleOutputs) {
                 if (output.score !== 0 && Math.sign(output.score) === finalSign) {
@@ -199,15 +192,9 @@ export class DecisionAggregator {
             }
         }
 
-        const moduleAgreement = totalReliabilityWeight > 0
-            ? agreeingWeight / totalReliabilityWeight
-            : 0;
+        const moduleAgreement = totalReliabilityWeight > 0 ? agreeingWeight / totalReliabilityWeight : 0;
+        const conflictLevel = totalFlux > 0 ? 1 - (Math.abs(weightedSum) / totalFlux) : 0;
 
-        const conflictLevel = totalFlux > 0
-            ? 1 - (Math.abs(weightedSum) / totalFlux)
-            : 0;
-
-        // Взвешенная надежность активных модулей
         let sumRel = 0;
         let countRel = 0;
         for (const output of moduleOutputs) {
@@ -241,13 +228,11 @@ export class DecisionAggregator {
         };
     }
 
-    // Хелпер: Получить скор конкретного модуля
     private getModuleScore(outputs: ModuleOutput[], name: ModuleName): number {
         const module = outputs.find(m => m.name === name);
         return module ? module.score : 0;
     }
 
-    // Хелпер: Добавить тег модулю (для логов FLIP)
     private addTagToModule(outputs: ModuleOutput[], name: ModuleName, tag: string): void {
         const module = outputs.find(m => m.name === name);
         if (module) {
@@ -268,7 +253,6 @@ export class DecisionAggregator {
         const sortedOutputs = [...moduleOutputs].sort((a, b) => {
             return (this.weights[b.name] || 0) - (this.weights[a.name] || 0);
         });
-
         for (const output of sortedOutputs) {
             if (output.score !== 0) {
                 for (const tag of output.tags) {

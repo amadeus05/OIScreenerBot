@@ -30,10 +30,10 @@ import {
     LevelsModule,
     BaseModule,
 } from './modules';
+import { MarketContext } from './types/context'; // Импорт типа контекста
 
 /**
  * Main Signal Analyzer Service
- * Coordinates all components to produce trading signals
  */
 export class SignalAnalyzerService {
     private readonly logger = new Logger('SignalAnalyzer');
@@ -78,7 +78,6 @@ export class SignalAnalyzerService {
             new LiquidationModule(),
             this.levelsModule,
         ];
-
         this.logger.info('SignalAnalyzerService initialized');
     }
 
@@ -86,11 +85,10 @@ export class SignalAnalyzerService {
      * Analyze a symbol and generate a trading signal
      * @param symbol Trading pair symbol (e.g., 'BTCUSDT')
      * @param bars Recent 1m bar history (newest last)
-     * @returns Signal result with trade recommendation
+     * @param context Global Market Context (BTC/ETH trend)
      */
-    analyze(symbol: string, bars: BarData[]): SignalResult {
+    analyze(symbol: string, bars: BarData[], context?: MarketContext): SignalResult {
         if (bars.length < 50) {
-            this.logger.warn(`Not enough bars for ${symbol} analysis: ${bars.length} < 20`);
             return this.noTradeResult(symbol, 'Insufficient data');
         }
 
@@ -105,9 +103,7 @@ export class SignalAnalyzerService {
 
             // 3. Get multi-timeframe data
             const bars1m = aggregator.getBars('1m', 100) as BarData[];
-            const bars5m = aggregator.getBars('5m', 30);
-            const bars15m = aggregator.getBars('15m', 15);
-
+            
             // 4. Compute features for 1m timeframe (primary)
             const featureEngine = this.getOrCreateFeatureEngine(symbol);
             const features = featureEngine.computeFeatures(bars1m);
@@ -123,12 +119,11 @@ export class SignalAnalyzerService {
             const moduleOutputs = this.runModules(features, bars1m);
 
             // 6. Aggregate module scores
-            // [FIX] Передаем features вторым аргументом для "Умной фильтрации" (Veto)
-            const aggregation = this.decisionAggregator.aggregate(moduleOutputs, features);
+            // === ПЕРЕДАЕМ КОНТЕКСТ В АГРЕГАТОР ДЛЯ ФИЛЬТРАЦИИ ===
+            const aggregation = this.decisionAggregator.aggregate(moduleOutputs, features, context);
 
             // 7. If NO_TRADE, return early
             if (aggregation.action === 'NO_TRADE') {
-                // Если был VetoReason, добавляем его в причину
                 const reason = aggregation.vetoReason ? `Veto: ${aggregation.vetoReason}` : 'Below threshold';
                 return this.noTradeResult(symbol, reason, aggregation.rawScore, moduleOutputs);
             }
@@ -147,7 +142,6 @@ export class SignalAnalyzerService {
             }
 
             // 10. Calculate entry/SL/TP
-            // [FIX] Передаем режим рынка (regime) для адаптивных стопов и тейков
             const entryResult = this.entryCalculator.calculate(
                 aggregation.action,
                 bars1m,
@@ -156,10 +150,8 @@ export class SignalAnalyzerService {
                 regimeAnalysis.regime
             );
 
-            // === ИСПРАВЛЕНИЕ 1: Если калькулятор входа забраковал сделку (маленький RR) ===
+            // 10.1. Entry Validation (RR check)
             if (!entryResult.isValid) {
-                // Возвращаем NO_TRADE, даже если модули хотели войти.
-                // Добавляем причину из калькулятора (например 'RR too low')
                 return this.noTradeResult(
                     symbol, 
                     entryResult.reason || 'Invalid Entry (RR)', 
@@ -170,9 +162,8 @@ export class SignalAnalyzerService {
 
             // 11. Collect all tags
             const reasonTags = this.decisionAggregator.collectReasonTags(moduleOutputs);
-            
-            // Добавляем теги режима и причины Veto/Flip
             reasonTags.push(`REGIME_${regimeAnalysis.regime}`);
+            
             if (aggregation.vetoReason) {
                 reasonTags.push(aggregation.vetoReason);
             }
@@ -196,7 +187,6 @@ export class SignalAnalyzerService {
                 modules: this.decisionAggregator.getModuleScoresRecord(moduleOutputs),
                 reasonTags,
                 riskPct: entryResult.riskPct,
-
                 marketRegime: regimeAnalysis.regime,
 
                 meta: {
@@ -206,7 +196,8 @@ export class SignalAnalyzerService {
                     atr: features.atr,
                     volZ: features.volZ,
                     flowImb: features.flowImb,
-                    regime: regimeAnalysis.regime // Полезно для отладки
+                    regime: regimeAnalysis.regime,
+                    globalTrend: context?.globalTrend || 'UNKNOWN' // Сохраняем для истории
                 },
             };
 
@@ -219,26 +210,16 @@ export class SignalAnalyzerService {
         }
     }
 
-    /**
-     * Warm up stateful components with historical data
-     * This must be called BEFORE analyze() for accurate results
-     * 
-     * @param symbol Trading pair symbol
-     * @param bars Historical bars (oldest first, newest last)
-     */
+    // ... (остальные методы warmUp, isWarmedUp, etc. остаются без изменений)
     warmUp(symbol: string, bars: BarData[]): void {
         if (bars.length < 20) {
-            this.logger.warn(`Not enough bars for warm-up: ${bars.length} < 20`);
+             this.logger.warn(`Not enough bars for warm-up: ${bars.length} < 20`);
             return;
         }
-
         this.logger.info(`Warming up ${symbol} with ${bars.length} bars...`);
-
-        // Get or create components for this symbol
         const aggregator = this.getOrCreateAggregator(symbol);
         const featureEngine = this.getOrCreateFeatureEngine(symbol);
 
-        // Reset modules to ensure clean state
         for (const module of this.modules) {
             if ('reset' in module && typeof (module as any).reset === 'function') {
                 (module as any).reset();
@@ -246,56 +227,35 @@ export class SignalAnalyzerService {
         }
         featureEngine.reset();
 
-        // Process bars one by one to build up state
-        // Start from minimum required bars (20) and grow the window
         const minBars = 20;
-
         for (let i = minBars; i <= bars.length; i++) {
             const slice = bars.slice(0, i);
             const currentBar = slice[slice.length - 1];
-
-            // Add bar to aggregator
             aggregator.addBar(currentBar);
-
-            // Compute features (this updates RollingStats internally)
             const features = featureEngine.computeFeatures(slice);
-
-            // Run modules to build their internal state (only on last few bars to save time)
-            // Full module analysis only for last 50 bars, minimal processing for earlier
             if (i > bars.length - 50) {
                 for (const module of this.modules) {
                     try {
                         module.analyze(features, slice);
-                    } catch (error) {
-                        // Silently ignore errors during warm-up
-                    }
+                    } catch (error) { }
                 }
             }
         }
-
         this.logger.info(`Warm-up complete for ${symbol}. State initialized with ${bars.length} bars.`);
     }
 
-    /**
-     * Check if a symbol has warmed up state
-     */
     isWarmedUp(symbol: string): boolean {
         return this.symbolFeatureEngines.has(symbol) && this.symbolAggregators.has(symbol);
     }
 
-    /**
-     * Run all analysis modules
-     */
     private runModules(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput[] {
         const outputs: ModuleOutput[] = [];
-
         for (const module of this.modules) {
             try {
                 const output = module.analyze(features, bars);
                 outputs.push(output);
             } catch (error) {
                 this.logger.error(`Module ${module.name} error:`, error);
-                // Add neutral output on error
                 outputs.push({
                     name: module.name,
                     score: 0,
@@ -304,13 +264,9 @@ export class SignalAnalyzerService {
                 });
             }
         }
-
         return outputs;
     }
 
-    /**
-     * Check if price is near a strong level
-     */
     private checkNearStrongLevel(moduleOutputs: ModuleOutput[]): boolean {
         const levelsOutput = moduleOutputs.find(m => m.name === 'levels');
         if (!levelsOutput) return false;
@@ -319,9 +275,6 @@ export class SignalAnalyzerService {
         );
     }
 
-    /**
-     * Get or create aggregator for a symbol
-     */
     private getOrCreateAggregator(symbol: string): TimeframeAggregator {
         let aggregator = this.symbolAggregators.get(symbol);
         if (!aggregator) {
@@ -331,9 +284,6 @@ export class SignalAnalyzerService {
         return aggregator;
     }
 
-    /**
-     * Get or create feature engine for a symbol
-     */
     private getOrCreateFeatureEngine(symbol: string): FeatureEngine {
         let engine = this.symbolFeatureEngines.get(symbol);
         if (!engine) {
@@ -343,9 +293,6 @@ export class SignalAnalyzerService {
         return engine;
     }
 
-    /**
-     * Create NO_TRADE result
-     */
     private noTradeResult(
         symbol: string,
         reason: string,
@@ -359,7 +306,6 @@ export class SignalAnalyzerService {
             liquidations: 0,
             levels: 0,
         };
-
         for (const output of moduleOutputs) {
             moduleScores[output.name] = output.score;
         }
@@ -387,26 +333,17 @@ export class SignalAnalyzerService {
         };
     }
 
-    /**
-     * Clear cached data for a symbol
-     */
     clearSymbol(symbol: string): void {
         this.symbolAggregators.delete(symbol);
         this.symbolFeatureEngines.delete(symbol);
     }
 
-    /**
-     * Clear all cached data
-     */
     clearAll(): void {
         this.symbolAggregators.clear();
         this.symbolFeatureEngines.clear();
         this.levelsModule.reset();
     }
 
-    /**
-     * Get detected levels for a symbol (debugging)
-     */
     getLevels(): { supports: any[]; resistances: any[] } {
         return this.levelsModule.getLevels();
     }

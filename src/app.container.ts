@@ -16,6 +16,7 @@ import { MarketDataGatewayService } from './infrastructure/market-data/market-da
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 // Signal Analyzer (isolated module)
 import { SignalAnalyzerService } from './domain/signal-analyzer';
+import { GlobalTrendService } from './domain/signal-analyzer/services/global-trend.service'; // Обновленный путь
 
 // Telegram
 import { TelegramBotService } from './infrastructure/telegram/telegram.bot';
@@ -75,6 +76,9 @@ export function registerDependencies(): void {
 
   // --- 6.5. Signal Analyzer (isolated module) ---
   container.bind(SignalAnalyzerService, () => new SignalAnalyzerService());
+  container.bind(GlobalTrendService, () => new GlobalTrendService(
+    container.get('IMarketDataRepository') // Ему нужен доступ к данным
+));
 
   // --- 7. Application Entry ---
   container.bind(CommandHandler, () => new CommandHandler(
@@ -93,6 +97,7 @@ export function registerDependencies(): void {
     container.get(TelegramBotService),
     container.get('IAnalizationResultRepository'),
     container.get('IMarketDataRepository'), // <--- UPDATED: Pass memory repository
+    container.get(GlobalTrendService)
   ));
 
   container.bind(SignalVerifierService, () => new SignalVerifierService(

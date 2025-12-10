@@ -8,6 +8,9 @@ import { AnalizationResult } from '../../domain/entities/analization-result.enti
 import { Inject } from '../../shared/decorators';
 import { IMarketDataRepository } from '../../domain/interfaces/services.interface';
 
+import { GlobalTrendService } from '../../domain/signal-analyzer/services/global-trend.service';
+import { MarketContext } from '../../domain/signal-analyzer/types/context';
+
 export interface SignalScannerConfig {
     intervalMs: number;
     minCandles: number;
@@ -27,14 +30,11 @@ const DEFAULT_CONFIG: SignalScannerConfig = {
     alertChatId: process.env.TELEGRAM_ALERT_CHAT_ID || '',
 
     // Фильтр: Минимальный суточный объем $10,000,000
-    // Все, что меньше — мусор, который легко манипулируется
     min24hVolumeUSD: 10_000_000, 
     
-    // Черный список (можно пополнять)
+    // Черный список
     blacklistedSymbols: [
-        // Стейблкоины (они не пампятся, только шумят)
         'USDCUSDT', 'USDPUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'BUSDUSDT', 'DAIUSDT', 'EURUSDT',
-        // Токены с проблемами / Делистинг / Странное поведение
         'BTCDOMUSDT', 'BLUEBIRDUSDT', '1000LUNCUSDT', 'USTCUSDT' 
     ]
 };
@@ -51,14 +51,14 @@ export class SignalScannerService {
     private lastScanTime = 0;
     
     private allSymbols: string[] = [];
-    private rotationIndex = 0;
 
     constructor(
         signalAnalyzer: SignalAnalyzerService,
         telegramBot: TelegramBotService,
         analizationResultRepository: IAnalizationResultRepository,
-        @Inject('IMarketDataRepository') private readonly marketDataRepository: IMarketDataRepository, // <--- INJECTED
-        config: Partial<SignalScannerConfig> = {}
+        @Inject('IMarketDataRepository') private readonly marketDataRepository: IMarketDataRepository,
+        private readonly globalTrendService: GlobalTrendService,
+        config: Partial<SignalScannerConfig> = {},
     ) {
         this.config = { ...DEFAULT_CONFIG, ...config };
         this.signalAnalyzer = signalAnalyzer;
@@ -101,15 +101,30 @@ export class SignalScannerService {
             const symbols = this.getSymbolsToScan();
             if (symbols.length === 0) return;
 
+            // === 1. ПОЛУЧАЕМ ГЛОБАЛЬНЫЙ КОНТЕКСТ (Один раз на весь цикл) ===
+            const context: MarketContext = await this.globalTrendService.analyze();
+            
+            // Логируем состояние рынка (для отладки в консоли)
+            if (context.riskLevel !== 'LOW') {
+                this.logger.info(`⚠️ Market Context: Global=${context.globalTrend}, Risk=${context.riskLevel}. ${context.permissions.reason}`);
+            }
+
+            // Если риск CRASH (Крах рынка), можно вообще остановить сканирование или искать только шорты
+            // Но мы передадим контекст внутрь, пусть анализатор решает.
+
             this.logger.info(`Scanning ${symbols.length} symbols (RAM)...`);
 
             let signalCount = 0;
             const results: SignalResult[] = [];
-            
-            // В памяти это происходит очень быстро, батчинг можно уменьшить или делать всё сразу
+
             for (const symbol of symbols) {
+                // Пропускаем BTC и ETH, так как они сами формируют контекст (чтобы не было рекурсии логики)
+                if (symbol === 'BTCUSDT' || symbol === 'ETHUSDT') continue;
+
                 try {
-                    const result = await this.analyzeSymbol(symbol);
+                    // === 2. ПЕРЕДАЕМ КОНТЕКСТ В АНАЛИЗАТОР ===
+                    const result = await this.analyzeSymbol(symbol, context);
+                    
                     if (result) {
                         results.push(result);
                         if (result.action !== 'NO_TRADE') {
@@ -133,16 +148,13 @@ export class SignalScannerService {
     }
 
     private getSymbolsToScan(): string[] {
-        // Получаем список всех монет из памяти
         this.allSymbols = this.marketDataRepository.getAllKnownSymbols();
-        
         if (this.allSymbols.length === 0) return [];
-
         return this.allSymbols;
     }
 
-    private async analyzeSymbol(symbol: string): Promise<SignalResult | null> {
-        // 0. ФИЛЬТР: ЧЕРНЫЙ СПИСОК (Самый быстрый, проверяем первым)
+    private async analyzeSymbol(symbol: string, context: MarketContext): Promise<SignalResult | null> {
+        // 0. ФИЛЬТР: ЧЕРНЫЙ СПИСОК
         if (this.config.blacklistedSymbols?.includes(symbol)) {
             return null;
         }
@@ -155,31 +167,23 @@ export class SignalScannerService {
             return null;
         }
 
-        // === 3. ФИЛЬТР: ОБЪЕМ ТОРГОВ (Используем candles) ===
+        // 3. ФИЛЬТР: ОБЪЕМ ТОРГОВ
         if (this.config.min24hVolumeUSD > 0) {
-            // Берем последние 100 свечей (или сколько есть) для оценки
             const checkWindow = Math.min(candles.length, 100);
-            // slice(-N) берет N последних элементов
-            const sample = candles.slice(-checkWindow); 
-            
+            const sample = candles.slice(-checkWindow);
             let sumVolumeUSD = 0;
             for (const c of sample) {
-                // Объем ($) = кол-во монет * цена закрытия
-                sumVolumeUSD += c.ohlc.v * c.ohlc.c; 
+                sumVolumeUSD += c.ohlc.v * c.ohlc.c;
             }
-            
             const avgVolumePerMinute = sumVolumeUSD / checkWindow;
-            const estimated24hVol = avgVolumePerMinute * 1440; // 1440 минут в сутках
+            const estimated24hVol = avgVolumePerMinute * 1440;
 
-            // Если объем меньше лимита — выходим.
-            // Переменная 'bars' еще не создана, ресурсы не потрачены.
             if (estimated24hVol < this.config.min24hVolumeUSD) {
-                // this.logger.debug(`Skipping ${symbol}: Low Vol`);
                 return null;
             }
         }
 
-        // 4. КОНВЕРТАЦИЯ (Создаем bars только сейчас)
+        // 4. КОНВЕРТАЦИЯ
         const bars = smartCandlesToBarData(candles, symbol);
 
         // 5. WARMUP АНАЛИЗАТОРА
@@ -187,11 +191,10 @@ export class SignalScannerService {
             this.signalAnalyzer.warmUp(symbol, bars);
         }
 
-        // 6. АНАЛИЗ
-        return this.signalAnalyzer.analyze(symbol, bars);
+        // 6. АНАЛИЗ (С учетом контекста)
+        return this.signalAnalyzer.analyze(symbol, bars, context);
     }
 
-    // ... (logResult, formatLogLine, sendNotification, formatTelegramMessage, saveToDatabase, mapToAnalizationResult, ensureLogDir remain unchanged)
     private logResult(result: SignalResult): void {
         try {
             const date = new Date().toISOString().split('T')[0];
@@ -207,16 +210,12 @@ export class SignalScannerService {
         const now = new Date();
         const kyivTime = new Date(now.getTime() + (2 * 60 * 60 * 1000));
         const ts = kyivTime.toISOString().replace('T', ' ').slice(0, 19);
-        
         const modules = `OF:${result.modules.orderflow.toFixed(2)} OI:${result.modules.oi.toFixed(2)} M:${result.modules.momentum.toFixed(2)} L:${result.modules.levels.toFixed(2)} Lq:${result.modules.liquidations.toFixed(2)}`;
         const entry = `E:${result.entryPrice.toFixed(6)}`;
         const sl = `SL:${result.sl.toFixed(6)}`;
         const tp = result.tp[0] ? `TP:${result.tp[0].toFixed(6)}` : 'TP:-';
         
-        // === ДОБАВЛЯЕМ ВЫВОД REGIME ===
-        // padEnd(8) выровняет строку, чтобы логи были ровными (VOLATILE - самое длинное слово)
-        const regime = (result.marketRegime || 'N/A').padEnd(8); 
-
+        const regime = (result.marketRegime || 'N/A').padEnd(8);
         return `${ts} | ${result.symbol.padEnd(10)} | ${result.action.padEnd(5)} | conf=${result.confidence.toFixed(2)} | ${entry} ${sl} ${tp} | ${modules} | ${regime} | ${result.reasonTags.slice(0, 3).join(',')}`;
     }
 
@@ -275,12 +274,11 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
         result.riskPct = signalResult.riskPct;
 
         result.marketRegime = signalResult.marketRegime || 'RANGING';
-
         result.meta = { 
             rawScore: signalResult.meta.rawScore, 
-            moduleAgreement: signalResult.meta.moduleAgreement 
+            moduleAgreement: signalResult.meta.moduleAgreement,
+            globalTrend: signalResult.meta.globalTrend // Сохраняем и глобальный тренд
         };
-
         return result;
     }
 

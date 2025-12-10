@@ -17,7 +17,7 @@ export class OrderflowModule extends BaseModule {
     private readonly historySize = 50;
     private lastProcessedTime = 0;
 
-    analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
+    analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         const currentBar = bars[bars.length - 1];
         if (!currentBar) return this.createOutput(0, 0, ['no_data']);
 
@@ -39,14 +39,15 @@ export class OrderflowModule extends BaseModule {
             ? (features.atr * 0.1) / currentBar.c 
             : 0.0005;
 
-        const context = {
+        // FIX: Локальный контекст
+        const predicateContext = {
             effectiveStd,
             flatThreshold,
-            currentPrice: currentBar.c
+            currentPrice: currentBar.c,
+            marketContext
         };
 
-        // 3. BASE CALCULATION (Continuous math model)
-        // Оставляем базовую математику как "Фундамент", к которому добавятся сценарии
+        // 3. BASE CALCULATION
         const flowNorm = clamp(features.flowImb, -1, 1);
         const dCVDNorm = features.dCVD / effectiveStd;
         const dCVDComponent = clamp((sigmoid(dCVDNorm) * 2) - 1, -1, 1);
@@ -58,25 +59,22 @@ export class OrderflowModule extends BaseModule {
             this.config.dcvdWeight * dCVDComponent +
             this.config.volZWeight * volComponent;
 
-        // 4. SCENARIO ENGINE (Overrides & Patterns)
+        // 4. SCENARIO ENGINE
         let totalScore = Math.tanh(this.config.tanhScale * rawMathScore);
-        let maxReliability = 0.6; // Base reliability
+        let maxReliability = 0.6;
         const activeTags = new Set<string>();
 
-        // Если сработает сильный паттерн (Absorption), он должен ПЕРЕБИТЬ базовый скор
         let overrideTriggered = false;
 
         for (const scenario of OrderflowScenarios) {
-            const isMatch = scenario.conditions.every(c => c(features, context));
+            // FIX: Передаем predicateContext
+            const isMatch = scenario.conditions.every(c => c(features, predicateContext));
             if (isMatch) {
-                // Если это паттерн поглощения (Wall), он важнее базовой математики
                 if (scenario.tags.includes('hidden_selling_wall') || scenario.tags.includes('hidden_buying_wall')) {
-                    totalScore = scenario.baseScore; // Hard override
+                    totalScore = scenario.baseScore;
                     overrideTriggered = true;
                 } else {
-                    // Иначе просто добавляем вес (Convergence)
                     if (!overrideTriggered) {
-                         // Усредняем с базой, чтобы не улететь за > 1
                          totalScore = (totalScore + scenario.baseScore) / 2;
                     }
                 }
@@ -86,7 +84,6 @@ export class OrderflowModule extends BaseModule {
             }
         }
 
-        // 5. PENALTIES
         if (features.volZ < -0.5) {
             activeTags.add('low_volume_noise');
             maxReliability -= 0.1;
@@ -94,7 +91,7 @@ export class OrderflowModule extends BaseModule {
 
         return this.createOutput(
             this.clampScore(totalScore),
-            this.clampScore(maxReliability), // clamp 0..1 really
+            this.clampScore(maxReliability),
             Array.from(activeTags)
         );
     }

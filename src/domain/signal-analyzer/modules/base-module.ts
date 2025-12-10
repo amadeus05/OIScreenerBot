@@ -1,14 +1,16 @@
-/**
- * Signal Analyzer Module - Base Module
- * Abstract base class for all analysis modules
- */
+// ========================================================================
+// FILE: src/domain/signal-analyzer/modules/base-module.ts
+// ========================================================================
 
 import { Features, ModuleOutput, ModuleName, BarData, AggregatedBar } from '../types';
 
-/**
- * Abstract base class for analysis modules
- * Each module analyzes features and returns a score [-1, 1] with reliability [0, 1]
- */
+export interface AnalysisContext {
+    regime: string;      // 'RANGING' | 'TRENDING' | 'VOLATILE'
+    globalTrend: string; // 'UP' | 'DOWN' | 'FLAT'
+    currentPrice: number;
+    // Можно расширять
+}
+
 export abstract class BaseModule {
     abstract readonly name: ModuleName;
 
@@ -16,15 +18,14 @@ export abstract class BaseModule {
      * Analyze features and return score with reliability
      * @param features Computed features for current bar
      * @param bars Recent bars for additional context
+     * @param context Global market context (Regime, BTC Trend, etc.)
      */
     abstract analyze(
         features: Features,
-        bars: (BarData | AggregatedBar)[]
+        bars: (BarData | AggregatedBar)[],
+        context?: AnalysisContext // <-- НОВЫЙ АРГУМЕНТ
     ): ModuleOutput;
 
-    /**
-     * Create module output with consistent structure
-     */
     protected createOutput(
         score: number,
         reliability: number,
@@ -38,23 +39,14 @@ export abstract class BaseModule {
         };
     }
 
-    /**
-     * Clamp score to [-1, 1] range
-     */
     protected clampScore(score: number): number {
         return Math.max(-1, Math.min(1, score));
     }
 
-    /**
-     * Tanh with scale factor for score normalization
-     */
     protected scaledTanh(value: number, scale: number): number {
         return Math.tanh(scale * value);
     }
 
-    /**
-     * Sign function
-     */
     protected sign(value: number): number {
         if (value > 0) return 1;
         if (value < 0) return -1;

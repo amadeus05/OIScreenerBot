@@ -20,11 +20,10 @@ export class MomentumModule extends BaseModule {
     private currentTickEmaDiff = 0;
     private recentVolatility = new RollingStats(100);
 
-    analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
+    analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         const currentBar = bars[bars.length - 1];
         const currentPrice = currentBar.c;
 
-        // 1. UPDATE STATE
         if (currentBar.ts > this.lastProcessedTime) {
             if (this.lastProcessedTime !== 0) {
                 this.lastClosedEmaDiff = this.currentTickEmaDiff;
@@ -32,7 +31,6 @@ export class MomentumModule extends BaseModule {
             this.lastProcessedTime = currentBar.ts;
         }
 
-        // 2. DEAD MARKET FILTER
         const volatilityPct = (features.atr / currentPrice) * 100;
         this.recentVolatility.push(volatilityPct);
         const adaptiveThreshold = Math.max(this.recentVolatility.median() * 0.3, 0.01);
@@ -40,39 +38,38 @@ export class MomentumModule extends BaseModule {
             return this.createOutput(0, 0.1, ['dead_market']);
         }
 
-        // 3. BASE CALCULATION (Trend)
         const emaDiff = features.emaFast - features.emaSlow;
         this.currentTickEmaDiff = emaDiff;
         const m = emaDiff / Math.max(features.emaSlow, EPS);
         let baseScore = this.scaledTanh(m, this.config.scaleFactor);
 
-        // 4. CONTEXT PREPARATION
         const deviation = (currentPrice - features.emaSlow) / features.atr;
-        const context = {
+        
+        // FIX: Локальный контекст
+        const predicateContext = {
             currentPrice,
             lastClosedEmaDiff: this.lastClosedEmaDiff,
-            deviation
+            deviation,
+            marketContext
         };
 
-        // 5. SCENARIO ENGINE
         let totalScore = baseScore;
         let reliability = 0.5;
         let isReversal = false;
         const activeTags = new Set<string>();
 
-        // Базовые теги структуры
         if (totalScore > 0.2) activeTags.add('bullish_structure');
         if (totalScore < -0.2) activeTags.add('bearish_structure');
 
         for (const scenario of MomentumScenarios) {
-            const isMatch = scenario.conditions.every(c => c(features, context));
+            // FIX: Передаем predicateContext
+            const isMatch = scenario.conditions.every(c => c(features, predicateContext));
             if (isMatch) {
-                // Если это Reversal, он заменяет трендовый скор
                 if (scenario.tags.includes('mean_reversion')) {
-                    totalScore = scenario.baseScore; // Override
+                    totalScore = scenario.baseScore;
                     isReversal = true;
                 } else {
-                    totalScore += scenario.baseScore; // Additive
+                    totalScore += scenario.baseScore;
                 }
                 
                 if (scenario.reliability > reliability) reliability = scenario.reliability;
@@ -80,14 +77,11 @@ export class MomentumModule extends BaseModule {
             }
         }
 
-        // 6. POST-PROCESSING (Stalling & Alignment)
-        // Если мы в тренде, но цена улетела далеко (Stalling), а сигнала на разворот еще нет
         if (!isReversal && Math.abs(deviation) > 1.5) {
-            totalScore *= 0.3; // Урезаем оптимизм
+            totalScore *= 0.3;
             activeTags.add('momentum_stalling');
         }
 
-        // Проверка согласованности цены и импульса (если не разворот)
         if (!isReversal) {
             const isAligned = (totalScore > 0 && currentPrice > features.emaSlow) || 
                               (totalScore < 0 && currentPrice < features.emaSlow);

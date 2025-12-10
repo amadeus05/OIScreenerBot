@@ -5,7 +5,7 @@
 import { Features, ModuleOutput, BarData, AggregatedBar } from '../types';
 import { MODULE_CONFIG } from '../types/config';
 import { BaseModule } from './base-module';
-import { OiScenarios } from '../rules/scenarios/oi.scenarios'; // <-- Импорт сценариев
+import { OiScenarios } from '../rules/scenarios/oi.scenarios';
 
 export class OIModule extends BaseModule {
     readonly name = 'oi' as const;
@@ -16,7 +16,8 @@ export class OIModule extends BaseModule {
     private readonly historySize = 200;
     private lastProcessedTime = 0;
 
-    analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
+    // FIX: Переименовали аргумент в marketContext, чтобы не было конфликта имен
+    analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         const currentBar = bars[bars.length - 1];
 
         // --- 0. VALIDATION & STATE ---
@@ -32,14 +33,17 @@ export class OIModule extends BaseModule {
         const fallbackMedian = currentOI * 0.001;
         const medianAbsDOI = this.calculateMedian(this.absDOIHistory) || fallbackMedian;
         
-        // Cap at 2.5x to prevent insane scores
+        // Cap at 2.5x to prevent insane scores on anomaly
         const strength = Math.min(2.5, Math.abs(features.dOI) / medianAbsDOI);
 
         // Фильтр шума
         if (strength < 0.25) return this.createOutput(0, 0, ['oi_neutral']);
 
-        // Дополнительный контекст для предикатов (если нужно)
-        const context = { price: currentBar.c };
+        // FIX: Создаем локальный контекст для предикатов
+        const predicateContext = { 
+            price: currentBar.c,
+            marketContext // Прокидываем глобальный контекст внутрь
+        };
 
         // --- 2. SCENARIO ENGINE (ДВИЖОК) ---
         let totalScore = 0;
@@ -47,13 +51,14 @@ export class OIModule extends BaseModule {
         const activeTags = new Set<string>();
 
         for (const scenario of OiScenarios) {
-            // Проверяем все условия сценария
-            const isMatch = scenario.conditions.every(condition => condition(features, context));
+            // Проверяем все условия сценария, передавая predicateContext
+            const isMatch = scenario.conditions.every(condition => condition(features, predicateContext));
 
             if (isMatch) {
                 // Рассчитываем вклад сценария
                 let scenarioScore = scenario.baseScore;
                 
+                // Если сценарий требует умножения на силу импульса
                 if (scenario.useStrengthMultiplier) {
                     scenarioScore *= strength;
                 }
@@ -61,15 +66,12 @@ export class OIModule extends BaseModule {
                 // Агрегация
                 totalScore += scenarioScore;
                 
-                // Надежность берем максимальную из сработавших (или можно усреднять)
+                // Надежность берем максимальную из сработавших
                 if (scenario.reliability > maxReliability) {
                     maxReliability = scenario.reliability;
                 }
 
                 scenario.tags.forEach(t => activeTags.add(t));
-                
-                // Дебаг лог (можно включить при необходимости)
-                // console.log(`Matched Scenario: ${scenario.name}, Score: ${scenarioScore}`);
             }
         }
 
@@ -79,7 +81,7 @@ export class OIModule extends BaseModule {
         
         return this.createOutput(
             finalScore,
-            maxReliability > 0 ? maxReliability : 0.5, // Default reliability
+            maxReliability > 0 ? maxReliability : 0.5, // Default reliability fallback
             Array.from(activeTags)
         );
     }

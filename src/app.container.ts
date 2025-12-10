@@ -15,7 +15,7 @@ import { SignalVerifierService } from './infrastructure/services/signal-verifier
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 // Signal Analyzer (isolated module)
-import { SignalAnalyzerService } from './domain/signal-analyzer';
+import { LevelsModule, LiquidationModule, MomentumModule, OIModule, OrderflowModule, SignalAnalyzerService } from './domain/signal-analyzer';
 import { GlobalTrendService } from './domain/signal-analyzer/services/global-trend.service'; // Обновленный путь
 
 // Telegram
@@ -75,7 +75,13 @@ export function registerDependencies(): void {
   container.bind(RemoveTriggerUseCase, () => new RemoveTriggerUseCase(container.get('ITriggerRepository')));
 
   // --- 6.5. Signal Analyzer (isolated module) ---
-  container.bind(SignalAnalyzerService, () => new SignalAnalyzerService());
+  container.bind('IModules', () => [
+      new MomentumModule(),
+      new OrderflowModule(),
+      new OIModule(),
+      new LiquidationModule(),
+      new LevelsModule()
+  ]);
   container.bind(GlobalTrendService, () => new GlobalTrendService(
     container.get('IMarketDataRepository') // Ему нужен доступ к данным
 ));
@@ -104,6 +110,14 @@ export function registerDependencies(): void {
     container.get('IAnalizationResultRepository'),
     container.get('IMarketDataRepository')
   ))
+
+  container.bind(SignalAnalyzerService, () => new SignalAnalyzerService(
+    container.get('IModules') // Явная передача (хотя декоратор должен сработать и так, но для надежности)
+  ));
+
+  container.bind(GlobalTrendService, () => new GlobalTrendService(
+      container.get('IMarketDataRepository')
+  ));
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(
     container.get('IMarketDataGateway'),

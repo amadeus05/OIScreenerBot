@@ -16,7 +16,7 @@ export class LiquidationModule extends BaseModule {
     private historyIntensityShort: number[] = [];
     private lastProcessedTs = 0;
 
-    analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
+    analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         if (bars.length < 15) return this.createOutput(0, 0.3, []);
 
         const currentBar = bars[bars.length - 1];
@@ -36,7 +36,6 @@ export class LiquidationModule extends BaseModule {
             this.lastProcessedTs = currentBar.ts;
         }
 
-        // 2. PREPARE CONTEXT (Calculations)
         const currentOI = currentBar.oi || currentBar.v || 1;
         const liqs = currentBar.liquidations || { long: 0, short: 0 };
         
@@ -69,11 +68,12 @@ export class LiquidationModule extends BaseModule {
         const accumulatedThresholdShort = threshShort * 5 * currentOI;
         const isGrindingUp = shortBias15m > longBias15m * 3 && shortBias15m > accumulatedThresholdShort;
 
-        const context = {
+        const predicateContext = {
             isHugeLong,
             isHugeShort,
             isCascadeAccel: isShortCascadeAccel || isLongCascadeAccel,
-            isGrindingUp
+            isGrindingUp,
+            marketContext // Можно вложить глобальный контекст внутрь, если понадобится
         };
 
         // 3. SCENARIO ENGINE
@@ -81,14 +81,14 @@ export class LiquidationModule extends BaseModule {
         let maxReliability = 0.5;
         const activeTags = new Set<string>();
 
-        // Bi-directional rekt check (Конфликт)
         if (isHugeLong && isHugeShort) {
             activeTags.add('bi_directional_rekt');
             return this.createOutput(0, 0.2, Array.from(activeTags));
         }
 
         for (const scenario of LiquidationScenarios) {
-            const isMatch = scenario.conditions.every(c => c(features, context));
+            // Передаем predicateContext
+            const isMatch = scenario.conditions.every(c => c(features, predicateContext));
             if (isMatch) {
                 totalScore += scenario.baseScore;
                 if (scenario.reliability > maxReliability) maxReliability = scenario.reliability;

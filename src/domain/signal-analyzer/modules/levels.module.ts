@@ -28,10 +28,9 @@ export class LevelsModule extends BaseModule {
     /**
      * Main Analysis Method (Scenario-Based)
      */
-    analyze(features: Features, bars: (BarData | AggregatedBar)[]): ModuleOutput {
+    analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         const tags: string[] = [];
 
-        // Need enough data for swing detection
         if (bars.length < this.config.swingWindow * 2 + 1) {
             return this.createOutput(0, 0.3, tags);
         }
@@ -46,22 +45,18 @@ export class LevelsModule extends BaseModule {
             this.lastProcessedBarTs = currentBar.ts;
             this.applyDecay();
         }
-
-        // Detect new swings & Update existing levels
         this.detectSwingsWithTolerance(bars, atr);
         this.checkTouches(currentBar, atr);
         this.pruneWeakLevels();
 
-        // 2. PREPARE CONTEXT FOR SCENARIOS
+        // 2. PREPARE CONTEXT
         const levelContext = this.getLevelContext(currentPrice, atr);
         const breakout = this.detectConfirmedBreakout(bars, atr);
         
-        // SFP Detection Logic (Swing Failure Pattern)
         let isSFP = false;
         let sfpType: 'resistance' | 'support' | null = null;
         
         if (levelContext.nearestResistance) {
-            // High выше уровня, Close ниже уровня, фитиль заметный
             if (currentBar.h > levelContext.nearestResistance.price && currentBar.c < levelContext.nearestResistance.price) {
                 if ((currentBar.h - currentBar.c) > atr * 0.3) {
                     isSFP = true;
@@ -70,7 +65,6 @@ export class LevelsModule extends BaseModule {
             }
         }
         if (levelContext.nearestSupport) {
-            // Low ниже уровня, Close выше уровня
             if (currentBar.l < levelContext.nearestSupport.price && currentBar.c > levelContext.nearestSupport.price) {
                 if ((currentBar.c - currentBar.l) > atr * 0.3) {
                     isSFP = true;
@@ -79,25 +73,23 @@ export class LevelsModule extends BaseModule {
             }
         }
 
-        // Proximity Logic
         let proximity = 'none';
         const priceRange = atr * 2;
-        if (levelContext.nearestResistance) {
-             const dist = levelContext.nearestResistance.price - currentPrice;
-             if (dist > 0 && dist < priceRange) proximity = 'near_resistance';
+        if (levelContext.nearestResistance && (levelContext.nearestResistance.price - currentPrice) < priceRange && (levelContext.nearestResistance.price - currentPrice) > 0) {
+            proximity = 'near_resistance';
         }
-        if (levelContext.nearestSupport) {
-             const dist = currentPrice - levelContext.nearestSupport.price;
-             if (dist > 0 && dist < priceRange) proximity = 'near_support';
+        else if (levelContext.nearestSupport && (currentPrice - levelContext.nearestSupport.price) < priceRange && (currentPrice - levelContext.nearestSupport.price) > 0) {
+            proximity = 'near_support';
         }
 
-        // Context object for Predicates
-        const context = {
+        // FIX: Локальный контекст
+        const predicateContext = {
             levelContext,
             breakout,
             isSFP,
             sfpType,
-            proximity
+            proximity,
+            marketContext
         };
 
         // 3. SCENARIO ENGINE
@@ -106,18 +98,14 @@ export class LevelsModule extends BaseModule {
         const activeTags = new Set<string>();
 
         for (const scenario of LevelsScenarios) {
-            // Check all conditions
-            const isMatch = scenario.conditions.every(c => c(features, context));
-            
+            // FIX: Передаем predicateContext
+            const isMatch = scenario.conditions.every(c => c(features, predicateContext));
             if (isMatch) {
-                // Special logic: Breakout strength scaling
                 let score = scenario.baseScore;
                 if (scenario.tags.includes('resistance_breakout') || scenario.tags.includes('support_breakdown')) {
                     score *= breakout.strength;
                 }
                 
-                // Aggregation
-                // Если это "бонусный" сценарий (score 0), он просто повышает надежность
                 if (scenario.baseScore === 0) {
                    if (maxReliability < 1.0) maxReliability += scenario.reliability;
                 } else {
@@ -129,12 +117,11 @@ export class LevelsModule extends BaseModule {
             }
         }
 
-        // FOMO Filter (Logic retained inside module as post-processing)
         if (activeTags.has('resistance_breakout')) {
              const dist = (currentPrice - (levelContext.nearestResistance?.price || currentPrice)) / atr;
              if (dist > 0.5) {
                  activeTags.add('breakout_extended_ignored');
-                 totalScore = 0; // Cancel signal
+                 totalScore = 0;
              }
         } else if (activeTags.has('support_breakdown')) {
              const dist = ((levelContext.nearestSupport?.price || currentPrice) - currentPrice) / atr;

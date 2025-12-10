@@ -85,6 +85,8 @@ export class AnalizationResult {
     @Column('decimal', { precision: 18, scale: 8, nullable: true })
     maxPriceReached!: number | null; // Максимальная цена, куда доходил рынок (для анализа жадности)
 
+    @Column({ type: 'varchar', nullable: true, default: 'RANGING' })
+    marketRegime!: string;
 
     @Column({ type: 'datetime', nullable: true })
     closedAt!: Date | null;

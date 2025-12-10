@@ -164,6 +164,8 @@ export interface SignalResult {
         moduleAgreement: number;
         [key: string]: any;
     };
+
+    marketRegime?: string;
 }
 
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH';

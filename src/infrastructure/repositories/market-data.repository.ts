@@ -6,19 +6,40 @@ class SymbolBuffer {
   public candles: SmartCandle[] = [];
   public lastPrice: number = 0;
   private readonly LIMIT = 1000;
-
   private pendingUpdates = new Map<number, Partial<any>>();
+
+  // === NEW METHOD ===
+  public injectHistory(history: SmartCandle[]) {
+    if (history.length === 0) return;
+
+    // Используем Map для дедупликации по timestamp.
+    // Приоритет: Данные, которые уже есть в буфере (они пришли по WS и новее/точнее),
+    // перезаписывают историю, если таймстемпы совпадают.
+    const map = new Map<number, SmartCandle>();
+
+    // 1. Заливаем историю
+    history.forEach(c => map.set(c.ts, c));
+
+    // 2. Накладываем текущий буфер (живые данные)
+    this.candles.forEach(c => map.set(c.ts, c));
+
+    // 3. Сортируем
+    const sorted = Array.from(map.values()).sort((a, b) => a.ts - b.ts);
+
+    // 4. Обрезаем
+    if (sorted.length > this.LIMIT) {
+        this.candles = sorted.slice(sorted.length - this.LIMIT);
+    } else {
+        this.candles = sorted;
+    }
+  }
 
   public update(data: MarketData) {
     if (data.price) this.lastPrice = data.price;
     const ind = data.indicators;
-
-    // --- СЦЕНАРИЙ 1: Полные данные свечи (OHLC + Индикаторы) ---
+    
     if (data.ohlc) {
       const pending = this.pendingUpdates.get(data.timestamp) || {};
-
-      // Мы не читаем ликвидации из pending, так как OI-поллинг их не сохраняет.
-      // Берем только текущие входящие данные.
       const liqLong = ind?.liquidationsLong ?? 0;
       const liqShort = ind?.liquidationsShort ?? 0;
 
@@ -32,7 +53,6 @@ class SymbolBuffer {
           v: data.ohlc.volume,
         },
         futures: {
-          // OI и Funding могут быть в pending
           oi: ind?.openInterest ?? pending.oi ?? this.getLast()?.futures.oi ?? 0,
           funding: ind?.fundingRate ?? pending.funding ?? this.getLast()?.futures.funding ?? 0,
         },
@@ -60,16 +80,13 @@ class SymbolBuffer {
       }
       this.pendingUpdates.delete(data.timestamp);
     }
-    // --- СЦЕНАРИЙ 2: Только индикаторы (OI Polling) ---
     else if (ind) {
       const last = this.getLast();
-
       if (last && last.ts === data.timestamp) {
         if (ind.openInterest) last.futures.oi = ind.openInterest;
         if (ind.fundingRate) last.futures.funding = ind.fundingRate;
       }
       else if (data.timestamp > (last?.ts || 0)) {
-        // Сохраняем только OI и Funding, так как они имеют смысл как Snapshot
         const existing = this.pendingUpdates.get(data.timestamp) || {};
         this.pendingUpdates.set(data.timestamp, {
           ...existing,
@@ -100,6 +117,16 @@ export class MarketDataRepository implements IMarketDataRepository {
   private store = new Map<string, SymbolBuffer>();
   private triggerEngine: ITriggerEngineService | null = null;
 
+  // === NEW METHOD EXPOSED ===
+  public injectHistory(symbol: string, history: SmartCandle[]): void {
+      let buffer = this.store.get(symbol);
+      if (!buffer) {
+          buffer = new SymbolBuffer();
+          this.store.set(symbol, buffer);
+      }
+      buffer.injectHistory(history);
+  }
+
   public updateMarketData(data: MarketData): void {
     let buffer = this.store.get(data.symbol);
     if (!buffer) {
@@ -107,7 +134,6 @@ export class MarketDataRepository implements IMarketDataRepository {
       this.store.set(data.symbol, buffer);
     }
     buffer.update(data);
-
     if (this.triggerEngine) {
       this.triggerEngine.onPriceUpdate(data.symbol, data.price);
     }

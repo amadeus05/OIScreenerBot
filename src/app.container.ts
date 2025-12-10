@@ -14,7 +14,6 @@ import { SignalScannerService } from './infrastructure/services/signal-scanner.s
 import { SignalVerifierService } from './infrastructure/services/signal-verifier.service';
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
-
 // Signal Analyzer (isolated module)
 import { SignalAnalyzerService } from './domain/signal-analyzer';
 
@@ -93,10 +92,12 @@ export function registerDependencies(): void {
     container.get(SignalAnalyzerService),
     container.get(TelegramBotService),
     container.get('IAnalizationResultRepository'),
+    container.get('IMarketDataRepository'), // <--- UPDATED: Pass memory repository
   ));
 
   container.bind(SignalVerifierService, () => new SignalVerifierService(
-    container.get('IAnalizationResultRepository')
+    container.get('IAnalizationResultRepository'),
+    container.get('IMarketDataRepository')
   ))
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(
@@ -106,6 +107,7 @@ export function registerDependencies(): void {
     container.get('ITriggerRepository'),
     container.get(CommandHandler),
     container.get(SignalScannerService),
-    container.get(SignalVerifierService)
+    container.get(SignalVerifierService),
+    container.get('IMarketDataRepository'), // <--- UPDATED: Pass memory repository to Bot for warmup
   ));
 }

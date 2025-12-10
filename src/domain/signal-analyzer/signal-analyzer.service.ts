@@ -90,7 +90,7 @@ export class SignalAnalyzerService {
      */
     analyze(symbol: string, bars: BarData[]): SignalResult {
         if (bars.length < 50) {
-            this.logger.warn(`Not enough bars for analysis: ${bars.length} < 20`);
+            this.logger.warn(`Not enough bars for ${symbol} analysis: ${bars.length} < 20`);
             return this.noTradeResult(symbol, 'Insufficient data');
         }
 
@@ -156,6 +156,18 @@ export class SignalAnalyzerService {
                 regimeAnalysis.regime
             );
 
+            // === ИСПРАВЛЕНИЕ 1: Если калькулятор входа забраковал сделку (маленький RR) ===
+            if (!entryResult.isValid) {
+                // Возвращаем NO_TRADE, даже если модули хотели войти.
+                // Добавляем причину из калькулятора (например 'RR too low')
+                return this.noTradeResult(
+                    symbol, 
+                    entryResult.reason || 'Invalid Entry (RR)', 
+                    aggregation.rawScore, 
+                    moduleOutputs
+                );
+            }
+
             // 11. Collect all tags
             const reasonTags = this.decisionAggregator.collectReasonTags(moduleOutputs);
             
@@ -184,6 +196,9 @@ export class SignalAnalyzerService {
                 modules: this.decisionAggregator.getModuleScoresRecord(moduleOutputs),
                 reasonTags,
                 riskPct: entryResult.riskPct,
+
+                marketRegime: regimeAnalysis.regime,
+
                 meta: {
                     rawScore: aggregation.rawScore,
                     moduleAgreement: aggregation.moduleAgreement,

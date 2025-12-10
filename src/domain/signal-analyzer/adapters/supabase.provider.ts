@@ -1,15 +1,7 @@
-/**
- * Signal Analyzer - Supabase Data Provider
- * Fetches historical candle data from Supabase for analysis
- */
-
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { BarData } from '../types';
 import { Logger } from '../../../shared/logger';
 
-/**
- * Database row structure for candles table
- */
 interface CandleRow {
     id: number;
     symbol: string;
@@ -35,10 +27,6 @@ interface CandleRow {
     created_at: string;
 }
 
-/**
- * Supabase data provider for Signal Analyzer
- * Fetches historical candle data directly from Supabase
- */
 export class SupabaseDataProvider {
     private readonly logger = new Logger('SupabaseDataProvider');
     private client: SupabaseClient | null = null;
@@ -50,114 +38,107 @@ export class SupabaseDataProvider {
         this.supabaseKey = supabaseKey || process.env.SUPABASE_API_KEY || '';
     }
 
-    /**
-     * Initialize Supabase client
-     */
     private getClient(): SupabaseClient {
         if (!this.client) {
             if (!this.supabaseUrl || !this.supabaseKey) {
-                throw new Error('Supabase credentials not configured. Set SUPABASE_URL and SUPABASE_API_KEY.');
+                throw new Error('Supabase credentials not configured.');
             }
             this.client = createClient(this.supabaseUrl, this.supabaseKey);
-            this.logger.info('Supabase client initialized');
         }
         return this.client;
     }
 
-    /**
-     * Retry operation with exponential backoff
-     */
     private async withRetry<T>(operation: () => Promise<T>, maxRetries: number = 3, context: string = ''): Promise<T> {
         let lastError: any;
-
         for (let i = 0; i < maxRetries; i++) {
             try {
                 return await operation();
             } catch (error: any) {
                 lastError = error;
-                const isNetworkError = error.message?.includes('fetch failed')
-                    || error.message?.includes('SocketError')
-                    || error.message?.includes('ECONNRESET');
-
-                if (!isNetworkError && i < maxRetries - 1) {
-                    // If it's not a network error, we might not want to retry, 
-                    // but for now let's retry on everything except explicit auth errors if we wanted
-                    // For safety, let's keep retrying as Supabase JS client can throw various errors
-                }
-
+                const isNetworkError = error.message?.includes('fetch failed') || error.message?.includes('SocketError');
+                if (!isNetworkError && i < maxRetries - 1) {}
                 if (i === maxRetries - 1) break;
-
-                const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
-                this.logger.warn(`Retry ${i + 1}/${maxRetries} for ${context} due to error: ${error.message || error}. Waiting ${delay.toFixed(0)}ms`);
-                await new Promise(resolve => setTimeout(resolve, delay));
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
-
         throw lastError;
     }
 
-    /**
-     * Check if Supabase is configured
-     */
     isConfigured(): boolean {
         return Boolean(this.supabaseUrl && this.supabaseKey);
     }
 
-    /**
-     * Fetch historical candles for a symbol
-     * @param symbol Trading pair (e.g., 'BTCUSDT')
-     * @param limit Number of candles to fetch (default 100)
-     * @returns Array of BarData sorted by timestamp (oldest first)
-     */
+    // --- OLD METHOD (SINGLE) ---
     async getHistory(symbol: string, limit: number = 100): Promise<BarData[]> {
+        return []; // Не используется в новом режиме
+    }
+
+    // --- NEW METHOD (BATCH with DEBUG) ---
+    async getHistoryForMany(symbols: string[], limitPerSymbol: number): Promise<Map<string, BarData[]>> {
         try {
             const client = this.getClient();
+            // Берем данные за последние 24 часа
+            const timeFilter = Date.now() - (24 * 60 * 60 * 1000);
+            
+            // Рассчитываем, сколько всего строк нам нужно.
+            // Например: 20 символов * 500 свечей = 10,000 строк.
+            const totalLimit = symbols.length * limitPerSymbol;
 
             const { data, error } = await this.withRetry(async () => {
                 return await client
                     .from('candles')
                     .select('*')
-                    .eq('symbol', symbol)
-                    .order('ts', { ascending: false })
-                    .limit(limit);
-            }, 3, `getHistory(${symbol})`);
+                    .in('symbol', symbols)
+                    .gte('ts', timeFilter)
+                    .order('ts', { ascending: false }) // <--- ВАЖНО: Берем СВЕЖИЕ первыми (DESC)
+                    .limit(totalLimit);                // <--- ВАЖНО: Явно перебиваем дефолт 1000
+            }, 3, `getHistoryForMany(${symbols.length})`);
 
             if (error) {
-                this.logger.error(`Supabase query error for ${symbol}:`, error);
-                return [];
+                this.logger.error('❌ Bulk fetch error:', error);
+                return new Map();
             }
 
             if (!data || data.length === 0) {
-                this.logger.warn(`No candles found for ${symbol}`);
-                return [];
+                return new Map();
             }
 
-            // Convert rows to BarData and reverse to oldest-first
-            const bars = (data as CandleRow[])
-                .map(row => this.rowToBarData(row))
-                .reverse();
+            this.logger.info(`✅ Bulk fetch returned ${data.length} rows (limit was ${totalLimit}).`);
 
-            this.logger.debug(`Fetched ${bars.length} candles for ${symbol} from Supabase`);
-            return bars;
+            const result = new Map<string, BarData[]>();
+            symbols.forEach(s => result.set(s, []));
+
+            // Раскладываем данные
+            for (const row of (data as CandleRow[])) {
+                // Убираем пробелы, если есть
+                const symbolKey = row.symbol.trim();
+                const bars = result.get(symbolKey);
+                
+                // Проверяем, не набрали ли мы уже лимит для этой конкретной монеты
+                if (bars && bars.length < limitPerSymbol) {
+                    bars.push(this.rowToBarData(row));
+                }
+            }
+
+            // РАЗВОРАЧИВАЕМ МАССИВЫ
+            // Мы получили их DESC (Новые -> Старые), а для графика нужно ASC (Старые -> Новые)
+            for (const [sym, bars] of result.entries()) {
+                // .reverse() работает in-place (мутирует массив), что нам и нужно
+                bars.reverse(); 
+            }
+
+            return result;
 
         } catch (error) {
-            this.logger.error(`Error fetching from Supabase for ${symbol}:`, error);
-            return [];
+            this.logger.error(`Error in bulk fetch:`, error);
+            return new Map();
         }
     }
 
-    /**
-     * Get all available symbols in the database
-     * Fetches distinct symbols by sampling recent data
-     */
     async getAvailableSymbols(): Promise<string[]> {
         try {
             const client = this.getClient();
-
-            // Supabase JS client doesn't support DISTINCT directly
-            // Workaround: Fetch recent records (last hour) to get variety of symbols
             const oneHourAgo = Date.now() - (60 * 60 * 1000);
-
             const { data, error } = await this.withRetry(async () => {
                 return await client
                     .from('candles')
@@ -166,62 +147,26 @@ export class SupabaseDataProvider {
                     .order('ts', { ascending: false })
                     .limit(10000);
             }, 3, 'getAvailableSymbols');
-
+    
             if (error) {
-                this.logger.error('Error fetching symbols from Supabase:', error);
+                this.logger.error('Error fetching symbols:', error);
                 return [];
             }
-
-            // Get unique symbols
-            const symbols = [...new Set((data || []).map((row: { symbol: string }) => row.symbol as string))];
-
-            this.logger.info(`Found ${symbols.length} unique symbols in Supabase (from ${data?.length || 0} recent rows)`);
-            return symbols;
-
+            return [...new Set((data || []).map((row: { symbol: string }) => row.symbol as string))];
         } catch (error) {
             this.logger.error('Error fetching symbols:', error);
             return [];
         }
     }
 
-    /**
-     * Check if symbol has enough data
-     */
     async hasEnoughData(symbol: string, minCandles: number = 20): Promise<boolean> {
-        try {
-            const client = this.getClient();
-
-            this.logger.debug(`hasEnoughData: Checking ${symbol}, min=${minCandles}`);
-
-            const { count, error } = await this.withRetry(async () => {
-                return await client
-                    .from('candles')
-                    .select('*', { count: 'exact', head: true })
-                    .eq('symbol', symbol);
-            }, 3, `hasEnoughData(${symbol})`);
-
-            if (error) {
-                this.logger.error(`hasEnoughData error for ${symbol}: ${error.message} (Code: ${error.code})`, error);
-                return false;
-            }
-
-            this.logger.debug(`hasEnoughData: ${symbol} has count=${count}`);
-            return (count || 0) >= minCandles;
-
-        } catch (err) {
-            this.logger.error(`hasEnoughData exception for ${symbol}:`, err);
-            return false;
-        }
+        return true;
     }
 
-    /**
-     * Convert database row to BarData
-     */
     private rowToBarData(row: CandleRow): BarData {
         const liq = row.liquidations || {};
-
         return {
-            symbol: row.symbol,
+            symbol: row.symbol.trim(), // Trim тут тоже важен
             ts: row.ts,
             o: row.o || 0,
             h: row.h || 0,
@@ -245,14 +190,11 @@ export class SupabaseDataProvider {
     }
 }
 
-/**
- * Singleton instance for convenience
- */
-let instance: SupabaseDataProvider | null = null;
-
 export function getSupabaseDataProvider(): SupabaseDataProvider {
-    if (!instance) {
-        instance = new SupabaseDataProvider();
-    }
-    return instance;
+    return new SupabaseDataProvider();
 }
+
+
+
+
+

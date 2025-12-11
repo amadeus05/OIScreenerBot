@@ -5,29 +5,20 @@
 import { MarketScenario } from '../types';
 import { Predicates as P } from '../predicates';
 
-/**
- * Конфигурация стратегий для OI Module.
- * Порядок важен: более специфичные сценарии должны идти раньше (или иметь уникальные условия),
- * чтобы перекрывать общие. В нашей реализации мы ищем Best Match или Sum.
- */
 export const OiScenarios: MarketScenario[] = [
-    // =================================================================
-    // GROUP A: OI RISING (Вход денег)
-    // =================================================================
-
     // 1. Классический Лонг (Trend Following)
-    // ОИ растет + Цена растет + Поток подтверждает (или нейтрален)
     {
         id: 'long_buildup_trend',
         name: 'Long Build-up (Trend)',
         conditions: [
             P.OI.IsRising,
             P.Price.IsUp,
-            (f) => !P.Flow.IsStrongSelling(f) // Нет сильных продаж по рынку
+            (f) => !P.Flow.IsStrongSelling(f),
+            P.Trend.IsBullish // <--- 🔥 ЗАЩИТА: Только по тренду
         ],
         baseScore: 0.6,
-        reliability: 0.6,
-        tags: ['oi_up', 'long_buildup'],
+        reliability: 0.7, 
+        tags: ['oi_up', 'long_buildup', 'trend_aligned'],
         useStrengthMultiplier: true
     },
     // 1.1 Усиление дельтой
@@ -37,29 +28,24 @@ export const OiScenarios: MarketScenario[] = [
         conditions: [
             P.OI.IsRising,
             P.Price.IsUp,
-            P.Flow.IsBuying // Покупки по рынку > 0.1
+            P.Flow.IsBuying 
         ],
-        baseScore: 0.2, // Добавка к основному
+        baseScore: 0.2, 
         reliability: 0.2,
         tags: ['delta_confirmed'],
         useStrengthMultiplier: false
     },
 
     // 2. Медвежье Поглощение (Absorption) - РАЗВОРОТ
-    // ОИ растет + Цена растет + НО дикие продажи по рынку (лимитный продавец держит)
-    // В оригинале: flowImb > 0.5 (Strong Buying) но цена не летит? 
-    // *Исправление логики оригинала*: Если цена растет, ОИ растет, и FlowImb > 0.5 (ОЧЕНЬ МНОГО ПОКУПОК), 
-    // но рост вялый (тут мы это не проверяем, но подразумеваем контекст) -> Это Bearish Absorption?
-    // В твоем коде было: if (flowImb > STRONG_FLOW) -> score = -0.3
     {
         id: 'bearish_absorption_wall',
         name: 'Bearish Absorption (Ask Wall)',
         conditions: [
             P.OI.IsRising,
             P.Price.IsUp,
-            P.Flow.IsStrongBuying // Толпа покупает, но это ловушка
+            P.Flow.IsStrongBuying 
         ],
-        baseScore: -0.9, // Перебиваем лонг сигнал (0.6 + 0.2 - 0.9 = -0.1)
+        baseScore: -0.9, 
         reliability: 0.5,
         tags: ['bearish_absorption', 'ask_wall_detected'],
         useStrengthMultiplier: false
@@ -72,41 +58,31 @@ export const OiScenarios: MarketScenario[] = [
         conditions: [
             P.OI.IsRising,
             P.Price.IsDown,
-            (f) => !P.Flow.IsStrongBuying(f)
+            (f) => !P.Flow.IsStrongBuying(f),
+            P.Trend.IsBearish // <--- 🔥 ЗАЩИТА: Только по тренду
         ],
         baseScore: -0.6,
-        reliability: 0.6,
-        tags: ['oi_up', 'short_buildup'],
+        reliability: 0.7,
+        tags: ['oi_up', 'short_buildup', 'trend_aligned'],
         useStrengthMultiplier: true
     },
 
     // 4. Бычье Поглощение (Absorption) - РАЗВОРОТ
-    // ОИ растет + Цена падает + НО дикие продажи (flowImb < -0.1), которые кто-то выкупает лимитками
-    // В оригинале: flowImb > WEAK (0.1) -> Bullish Absorption
-    // *Логика*: Цена падает, ОИ растет (шортят), но Flow > 0.1 (покупки по рынку??).
-    // Это значит, что цену давят вниз лимитками (спуфинг или айсберг), несмотря на покупки. 
-    // Или это "Passive Buying into Dump".
     {
         id: 'bullish_absorption_limit_bid',
         name: 'Bullish Absorption (Limit Bid)',
         conditions: [
             P.OI.IsRising,
             P.Price.IsDown,
-            P.Flow.IsBuying // Покупают по рынку, но цена падает? Странно. Или наоборот: продают, но цена стоит.
-            // В оригинале код: if (flowImb > WEAK_FLOW) score = 0.2
+            P.Flow.IsBuying 
         ],
-        baseScore: 0.8, // Переворачиваем шорт (-0.6 + 0.8 = +0.2)
+        baseScore: 0.8, 
         reliability: 0.4,
         tags: ['bullish_absorption', 'risky_reversal'],
         useStrengthMultiplier: false
     },
 
-
-    // =================================================================
-    // GROUP B: OI FALLING (Выход денег / Ликвидации)
-    // =================================================================
-
-    // 5. Short Covering (Закрытие шортов) - Цена вверх
+    // 5. Short Covering
     {
         id: 'short_covering',
         name: 'Short Covering',
@@ -114,12 +90,12 @@ export const OiScenarios: MarketScenario[] = [
             P.OI.IsFalling,
             P.Price.IsUp
         ],
-        baseScore: 0.3, // Слабый лонг
+        baseScore: 0.3, 
         reliability: 0.5,
         tags: ['oi_down', 'short_covering'],
         useStrengthMultiplier: true
     },
-    // 5.1 Panic Short Squeeze (Паника)
+    // 5.1 Panic Short Squeeze
     {
         id: 'panic_short_squeeze',
         name: 'Panic Short Squeeze',
@@ -127,15 +103,15 @@ export const OiScenarios: MarketScenario[] = [
             P.OI.IsFalling,
             P.Price.IsUp,
             P.Flow.IsStrongBuying,
-            (f, ctx) => P.Price.IsFastMove(f, ctx?.price || 1) // Нужна цена
+            (f, ctx) => P.Price.IsFastMove(f, ctx?.price || 1)
         ],
-        baseScore: 0.8, // Сильный лонг (импульс)
+        baseScore: 0.8, 
         reliability: 0.8,
         tags: ['panic_short_squeeze'],
-        useStrengthMultiplier: false // Фиксированный высокий скор
+        useStrengthMultiplier: false 
     },
 
-    // 6. Long Unwind (Закрытие лонгов) - Цена вниз
+    // 6. Long Unwind
     {
         id: 'long_unwind',
         name: 'Long Unwind',

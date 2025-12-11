@@ -78,38 +78,39 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
     },
 
     weights: {
-        // Увеличиваем вес Orderflow и Liquidations, так как они дают лучшие точки разворота
-        orderflow: 0.35,
-        liquidations: 0.25,
-        levels: 0.20,
-        momentum: 0.10,
+        // Упор на поток ордеров и импульс (скальпинг)
+        orderflow: 0.40, 
+        liquidations: 0.20,
+        levels: 0.10,     // Снижаем влияние уровней (на мемах их прошивают)
+        momentum: 0.20,   // Повышаем моментум (торгуем по движению)
         oi: 0.10,
     },
 
-    decision: {
-        // Поднимаем порог. Лучше пропустить сделку, чем войти в шум.
-        threshold: 0.55, 
-        noTradeZone: 0.1,
+decision: {
+        // Снижаем порог входа. Рынок шумный, идеальных 0.55 мало.
+        threshold: 0.50, // Было 0.55
+        noTradeZone: 0.05, // Уменьшаем мертвую зону
     },
 
     position: {
-        baseRiskPct: 0.5,
-        maxOpenTrades: 3,
-        minConfidence: 0.4, // Требуем более высокой уверенности
+        baseRiskPct: 1.0, 
+        maxOpenTrades: 5, // Разрешаем больше одновременных сделок
+        // Разрешаем входить в сделки со средней уверенностью
+        minConfidence: 0.50, // Было 0.55
     },
 
     levels: {
-        swingWindow: 8,
+        swingWindow: 5, 
         maxLevels: 10,
         swingToleranceAtr: 0.3,
         clusterThresholdAtr: 0.6,
-        decayRatePerBar: 0.001,
-        minStrengthToKeep: 0.10,
-        minTouchesForConfirmed: 3,
+        decayRatePerBar: 0.005, // Уровни живут недолго
+        minStrengthToKeep: 0.15,
+        minTouchesForConfirmed: 2, 
         touchProximityAtr: 0.4,
         maxTouchHistory: 20,
-        breakoutConfirmBars: 2,
-        breakoutVolumeRatio: 1.2,
+        breakoutConfirmBars: 1, 
+        breakoutVolumeRatio: 1.5,
         priorVolBars: 5,
     },
 
@@ -119,18 +120,26 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
         maxFundingPenalty: 0.4,
     },
 
-    technical: {
+technical: {
         atrPeriod: 14,
         emaFastPeriod: 8,
         emaSlowPeriod: 21,
-        entryOffsetAtrMult: 0.1,
-        slAtrMultMin: 1.0,
-        slAtrMultMax: 2.0,
-        slStructuralBars: 3,
-        tpRatios: [1.2, 2.5],
+        
+        // === ИЗМЕНЕНИЕ 1: Лимитный вход ===
+        // Ставим лимитку на 0.15 ATR лучше цены закрытия.
+        // Это фильтрует "FOMO-входы" на хаях свечи.
+        entryOffsetAtrMult: 0.15, // Было 0.0
+        
+        // === ИЗМЕНЕНИЕ 2: Чуть больше воздуха стопу ===
+        // Было 0.4 - слишком тесно, выбивает шумом.
+        slAtrMultMin: 0.6, // Чуть шире минимальный стоп
+        slAtrMultMax: 1.2, 
+        slStructuralBars: 3, // Смотрим на 3 свечи назад для поиска лоу, а не 2
+        
+        // Тейки оставляем агрессивными
+        tpRatios: [2.0, 5.0], 
     },
 };
-
 /**
  * Module-specific configuration
  */

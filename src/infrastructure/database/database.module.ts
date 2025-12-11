@@ -3,6 +3,7 @@ import { Signal } from '../../domain/entities/signal.entity';
 import { Trigger } from '../../domain/entities/trigger.entity';
 import { Logger } from '../../shared/logger';
 import { AnalizationResult } from '../../domain/entities/analization-result.entity';
+import { HistoryCandle } from '../../domain/entities/history-candle.entity';
 
 const logger = new Logger('DatabaseModule');
 
@@ -11,7 +12,7 @@ export const AppDataSource = new DataSource({
   database: './data/database.sqlite',
   synchronize: true, // Для разработки. В продакшене лучше использовать миграции.
   logging: false,
-  entities: [Trigger, Signal, AnalizationResult],
+  entities: [Trigger, Signal, AnalizationResult, HistoryCandle],
   migrations: [],
   subscribers: [],
 });

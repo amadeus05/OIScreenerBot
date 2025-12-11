@@ -1,6 +1,4 @@
-// ========================================================================
-// FILE: src/domain/signal-analyzer/services/entry-calculator.ts
-// ========================================================================
+// src/domain/signal-analyzer/services/entry-calculator.ts
 
 import { TradeAction, EntryType, BarData, AggregatedBar, Features } from '../types';
 import { DEFAULT_CONFIG } from '../types/config';
@@ -19,8 +17,10 @@ export interface EntryResult {
 }
 
 export class EntryCalculator {
-    private readonly positionConfig = DEFAULT_CONFIG.position;
-    
+    // Внедряем зависимости через конструктор или используем дефолт
+    // Лучше передавать конфиг в метод calculate, но пока берем из импорта для совместимости
+    private readonly config = DEFAULT_CONFIG;
+
     calculate(
         action: TradeAction,
         bars: (BarData | AggregatedBar)[],
@@ -28,7 +28,7 @@ export class EntryCalculator {
         confidence: number,
         regime: MarketRegime = 'RANGING'
     ): EntryResult {
-        if (action === 'NO_TRADE' || bars.length < 10) {
+        if (action === 'NO_TRADE' || bars.length < 5) {
             return this.emptyResult();
         }
 
@@ -36,129 +36,95 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // =========================================================
-        // 1. АДАПТАЦИЯ КОЭФФИЦИЕНТОВ (RISK/REWARD)
-        // =========================================================
-        let slMultiplier = 2.0; 
-        let tp1Multiplier = 1.0;
-        let tp2Multiplier = 2.0;
-
-        switch (regime) {
-            case 'TRENDING':
-                // 🔥 НОВЫЕ НАСТРОЙКИ: Широкий стоп (2.0), достижимый тейк (1.5)
-                slMultiplier = 2.0; 
-                tp1Multiplier = 1.5; 
-                tp2Multiplier = 3.0; 
-                break;
-            case 'VOLATILE':
-                slMultiplier = 3.0; 
-                tp1Multiplier = 1.0; 
-                tp2Multiplier = 2.0;
-                break;
-            case 'RANGING':
-            default:
-                slMultiplier = 2.0; 
-                tp1Multiplier = 1.0; 
-                tp2Multiplier = 2.0;
-                break;
-        }
-
-        // =========================================================
-        // 2. ВХОД (ENTRY)
-        // =========================================================
-        const isHighVelocity = Math.abs(features.flowImb) > 0.3 || features.volZ > 2.0;
-        const isUrgent = confidence >= 0.6 || isHighVelocity; 
-        
+        // 1. ВХОД (ENTRY)
+        // Для скальпинга входим сразу по рынку или с минимальным отступом
         let entryPrice = currentBar.c;
-        let entryType: EntryType = 'market';
+        const entryType: EntryType = 'market';
 
-        if (!isUrgent) {
-            entryType = 'limit';
-            const smartPullback = features.emaFast;
-            const distToEma = Math.abs(currentBar.c - smartPullback) / currentBar.c;
-            
-            if (distToEma < 0.008) { 
-                entryPrice = smartPullback;
-            } else {
-                entryPrice = currentBar.c - (direction * features.atr * 0.1);
-            }
+        if (this.config.technical.entryOffsetAtrMult > 0) {
+             // Лимитка чуть лучше рынка (на откате)
+             entryPrice -= (direction * features.atr * this.config.technical.entryOffsetAtrMult);
         }
 
-        // =========================================================
-        // 3. СТОП-ЛОСС (STOP LOSS)
-        // =========================================================
-        const lookback = 10;
-        const recentHigh = Math.max(...bars.slice(-lookback).map(b => b.h));
-        const recentLow = Math.min(...bars.slice(-lookback).map(b => b.l));
-
-        let sl = isLong 
-            ? Math.min(recentLow, currentBar.l) - (features.atr * slMultiplier) 
-            : Math.max(recentHigh, currentBar.h) + (features.atr * slMultiplier);
-
-        const minSlDist = entryPrice * 0.002;
-        if (Math.abs(entryPrice - sl) < minSlDist) {
-            sl = entryPrice - (direction * minSlDist);
-        }
-
-        // =========================================================
-        // 4. ТЕЙК-ПРОФИТ (TAKE PROFIT)
-        // =========================================================
-        const distSl = Math.abs(entryPrice - sl);
-        const greedFactor = 0.95;
-
-        let tp1 = entryPrice + (direction * distSl * tp1Multiplier * greedFactor);
+        // 2. СТОП-ЛОСС (STOP LOSS) - ИСПРАВЛЕННАЯ ЛОГИКА
+        // Используем настройку из конфига, а не хардкод
+        const lookback = this.config.technical.slStructuralBars || 2; 
         
-        if (regime === 'RANGING') {
-            const distToMean = (features.emaSlow - entryPrice) * direction;
-            if (distToMean > distSl * 1.0) { 
-                const emaTarget = features.emaSlow - (direction * features.atr * 0.1);
-                if (Math.abs(entryPrice - emaTarget) < Math.abs(entryPrice - tp1)) {
-                    tp1 = emaTarget;
-                }
-            }
+        // Берем последние N баров (включая текущий)
+        const relevantBars = bars.slice(-lookback);
+        const recentHigh = Math.max(...relevantBars.map(b => b.h));
+        const recentLow = Math.min(...relevantBars.map(b => b.l));
+
+        // Выбираем множитель ATR в зависимости от режима (адаптивность)
+        let slMultiplier = this.config.technical.slAtrMultMin;
+        if (regime === 'VOLATILE') {
+            slMultiplier = this.config.technical.slAtrMultMax;
         }
 
-        const tp2 = entryPrice + (direction * distSl * tp2Multiplier);
-        const tp = [tp1, tp2];
+        // Расчет уровня стопа
+        let slPrice: number;
+        if (isLong) {
+            // SL под локальным минимумом
+            const structuralSl = recentLow - (features.atr * slMultiplier);
+            // Хард кап стопа: не дальше чем entry - slAtrMultMax * ATR
+            const maxSlDist = features.atr * this.config.technical.slAtrMultMax;
+            slPrice = Math.max(structuralSl, entryPrice - maxSlDist);
+        } else {
+            // SL над локальным максимумом
+            const structuralSl = recentHigh + (features.atr * slMultiplier);
+            const maxSlDist = features.atr * this.config.technical.slAtrMultMax;
+            slPrice = Math.min(structuralSl, entryPrice + maxSlDist);
+        }
+
+        // Защита от слишком близкого стопа (шум)
+        const minSlDist = entryPrice * 0.003; // Минимум 0.3%
+        if (Math.abs(entryPrice - slPrice) < minSlDist) {
+            slPrice = entryPrice - (direction * minSlDist);
+        }
+
+        // 3. ТЕЙК-ПРОФИТ (TAKE PROFIT)
+        const risk = Math.abs(entryPrice - slPrice);
+        
+        // Используем коэффициенты из конфига [2.0, 4.0]
+        const tp = this.config.technical.tpRatios.map(ratio => {
+            return entryPrice + (direction * risk * ratio);
+        });
+
         const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
 
-        if (tpPct[0] < 0.25) { 
-             return { ...this.emptyResult(), isValid: false, reason: 'RR too low' };
+        // Sanity Check: Если стоп > 5%, отменяем сделку (слишком опасно для скальпа)
+        const slPct = Math.abs((slPrice - entryPrice) / entryPrice) * 100;
+        if (slPct > 5.0) {
+            return { ...this.emptyResult(), isValid: false, reason: 'StopLoss too wide (>5%)' };
         }
 
-        // =========================================================
-        // 6. 🔥 ДИНАМИЧЕСКИЙ ГОРИЗОНТ (TIME TO TARGET)
-        // =========================================================
-        
-        const distToTp = Math.abs(tp[0] - entryPrice);
-        // Скорость движения в минуту (через ATR)
-        const speedPerMinute = features.atr > 0 ? features.atr : (currentBar.c * 0.001);
-        let estimatedMinutes = distToTp / speedPerMinute;
-
-        // Коэффициент зигзага (рынок не идет по прямой)
-        const zigZagFactor = regime === 'VOLATILE' ? 2.0 : (regime === 'TRENDING' ? 3.0 : 4.0);
-        estimatedMinutes *= zigZagFactor;
-
-        // Ускорители (Объем и Поток)
-        if (features.volZ > 2.0) estimatedMinutes *= 0.7; 
-        if (Math.abs(features.flowImb) > 0.3) estimatedMinutes *= 0.8;
-
-        // Лимиты: от 10 мин до 4 часов
-        const dynamicHorizon = Math.ceil(Math.max(10, Math.min(estimatedMinutes, 240)));
+        // 4. ГОРИЗОНТ И РИСК
+        // Динамический расчет времени удержания
+        const estimatedMinutes = Math.ceil((risk * 2) / (features.atr || 1));
+        const horizonMin = Math.min(Math.max(15, estimatedMinutes), 120);
 
         return {
             entryType,
             entryPrice,
-            sl,
+            sl: slPrice,
             tp,
             tpPct,
-            horizonMin: dynamicHorizon, // Рассчитанное время
-            riskPct: this.positionConfig.baseRiskPct * confidence, 
+            horizonMin,
+            riskPct: this.config.position.baseRiskPct, // 1%
             isValid: true
         };
     }
 
     private emptyResult(): EntryResult {
-        return { entryType: 'market', entryPrice: 0, sl: 0, tp: [], tpPct: [], horizonMin: 0, riskPct: 0, isValid: false };
+        return { 
+            entryType: 'market', 
+            entryPrice: 0, 
+            sl: 0, 
+            tp: [], 
+            tpPct: [], 
+            horizonMin: 0, 
+            riskPct: 0, 
+            isValid: false 
+        };
     }
 }

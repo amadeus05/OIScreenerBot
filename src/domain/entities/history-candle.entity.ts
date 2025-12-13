@@ -8,7 +8,7 @@ export class HistoryCandle {
   @PrimaryGeneratedColumn()
   id!: number;
 
-  @Column()
+  @Column({ type: 'varchar' }) 
   @Index()
   symbol!: string;
 

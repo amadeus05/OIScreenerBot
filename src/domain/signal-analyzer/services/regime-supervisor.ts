@@ -1,5 +1,6 @@
 // ========================================================================
 // FILE: src/domain/signal-analyzer/services/regime-supervisor.ts
+// ИСПРАВЛЕНО: Правильная сортировка сценариев + улучшенные условия
 // ========================================================================
 
 import { Features } from '../types';
@@ -23,31 +24,41 @@ export class RegimeSupervisor {
     }
 
     public analyze(features: Features, currentPrice: number): RegimeAnalysis {
-        // 1. Сортируем сценарии по приоритету (от важного к неважному)
-        const sortedScenarios = [...RegimeScenarios].sort((a, b) => b.priority - a.priority);
-
-        // 2. Ищем первое совпадение
-        for (const scenario of sortedScenarios) {
-            // Если условий нет (пустой массив), считаем это Fallback (всегда true)
-            const isMatch = scenario.conditions.length === 0 || 
-                            scenario.conditions.every(condition => condition(features, currentPrice));
-
+        // 1. Сначала проверяем, есть ли ДОКАЗАТЕЛЬСТВА НЕ-боковика
+        const activeScenarios = [...RegimeScenarios]
+            .filter(s => s.regime !== 'RANGING') // Исключаем ranging из гонки
+            .sort((a, b) => b.priority - a.priority);
+    
+        for (const scenario of activeScenarios) {
+            const isMatch = scenario.conditions.every(condition => {
+                try {
+                    return condition(features, currentPrice);
+                } catch (e) {
+                    return false;
+                }
+            });
+    
             if (isMatch) {
                 return {
                     regime: scenario.regime,
-                    confidence: 1.0, // Сценарии детерминированы
-                    reason: `Matched: ${scenario.id}`,
+                    confidence: 1.0,
+                    reason: `${scenario.id} (strong evidence)`,
                     adjustedWeights: scenario.weights
                 };
             }
         }
-
-        // 3. Safety Fallback (если вдруг удалили default сценарий)
+    
+        // 2. Если НИЧЕГО не доказало тренд/волатильность → это RANGING
+        const rangingScenario = RegimeScenarios.find(s => s.regime === 'RANGING');
+        if (!rangingScenario) {
+            console.warn('No RANGING scenario defined!');
+        }
+    
         return {
             regime: 'RANGING',
-            confidence: 0,
-            reason: 'Fallback (No scenario matched)',
-            adjustedWeights: this.baseWeights
+            confidence: 1.0,
+            reason: 'No evidence of trend/volatility',
+            adjustedWeights: rangingScenario?.weights || this.baseWeights
         };
     }
 }

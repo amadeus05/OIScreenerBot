@@ -36,72 +36,64 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // 1. ВХОД (ENTRY)
-        // Для скальпинга входим сразу по рынку или с минимальным отступом
+        // --- ENTRY ---
         let entryPrice = currentBar.c;
-        const entryType: EntryType = 'market';
+        let entryType: EntryType = 'market';
 
         if (this.config.technical.entryOffsetAtrMult > 0) {
-             // Лимитка чуть лучше рынка (на откате)
-             entryPrice -= (direction * features.atr * this.config.technical.entryOffsetAtrMult);
+            entryPrice -= (direction * features.atr * this.config.technical.entryOffsetAtrMult);
+            entryType = 'limit'; // корректно выставляем тип
         }
 
-        // 2. СТОП-ЛОСС (STOP LOSS) - ИСПРАВЛЕННАЯ ЛОГИКА
-        // Используем настройку из конфига, а не хардкод
-        const lookback = this.config.technical.slStructuralBars || 2; 
-        
-        // Берем последние N баров (включая текущий)
+        // --- STOP LOSS ---
+        const lookback = this.config.technical.slStructuralBars || 2;
         const relevantBars = bars.slice(-lookback);
         const recentHigh = Math.max(...relevantBars.map(b => b.h));
         const recentLow = Math.min(...relevantBars.map(b => b.l));
 
-        // Выбираем множитель ATR в зависимости от режима (адаптивность)
         let slMultiplier = this.config.technical.slAtrMultMin;
-        if (regime === 'VOLATILE') {
-            slMultiplier = this.config.technical.slAtrMultMax;
-        }
+        if (regime === 'VOLATILE') slMultiplier = this.config.technical.slAtrMultMax;
 
-        // Расчет уровня стопа
         let slPrice: number;
         if (isLong) {
-            // SL под локальным минимумом
             const structuralSl = recentLow - (features.atr * slMultiplier);
-            // Хард кап стопа: не дальше чем entry - slAtrMultMax * ATR
             const maxSlDist = features.atr * this.config.technical.slAtrMultMax;
             slPrice = Math.max(structuralSl, entryPrice - maxSlDist);
         } else {
-            // SL над локальным максимумом
             const structuralSl = recentHigh + (features.atr * slMultiplier);
             const maxSlDist = features.atr * this.config.technical.slAtrMultMax;
             slPrice = Math.min(structuralSl, entryPrice + maxSlDist);
         }
 
-        // Защита от слишком близкого стопа (шум)
-        const minSlDist = entryPrice * 0.003; // Минимум 0.3%
+        const minSlDist = entryPrice * 0.003;
         if (Math.abs(entryPrice - slPrice) < minSlDist) {
             slPrice = entryPrice - (direction * minSlDist);
         }
 
-        // 3. ТЕЙК-ПРОФИТ (TAKE PROFIT)
+        // --- TAKE PROFIT ---
         const risk = Math.abs(entryPrice - slPrice);
-        
-        // Используем коэффициенты из конфига [2.0, 4.0]
-        const tp = this.config.technical.tpRatios.map(ratio => {
-            return entryPrice + (direction * risk * ratio);
-        });
 
+        // Адаптивные TP множители
+        let tpRatios = this.config.technical.tpRatios;
+        if (regime === 'TRENDING') tpRatios = [3.0, 6.0];
+        if (regime === 'RANGING') tpRatios = [1.5, 3.0];
+
+        const tp = tpRatios.map(ratio => entryPrice + (direction * risk * ratio));
         const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
 
-        // Sanity Check: Если стоп > 5%, отменяем сделку (слишком опасно для скальпа)
         const slPct = Math.abs((slPrice - entryPrice) / entryPrice) * 100;
         if (slPct > 5.0) {
             return { ...this.emptyResult(), isValid: false, reason: 'StopLoss too wide (>5%)' };
         }
 
-        // 4. ГОРИЗОНТ И РИСК
-        // Динамический расчет времени удержания
+        // --- HORIZON & RISK ---
         const estimatedMinutes = Math.ceil((risk * 2) / (features.atr || 1));
-        const horizonMin = Math.min(Math.max(15, estimatedMinutes), 120);
+        const horizonMin = Math.min(Math.max(30, estimatedMinutes), 180);
+
+        // Адаптивный риск: масштабируем от confidence
+        let riskPct = this.config.position.baseRiskPct;
+        riskPct *= confidence; // при низком confidence риск снижается
+        if (regime === 'VOLATILE') riskPct *= 0.7; // в волатильном режиме ещё меньше
 
         return {
             entryType,
@@ -110,21 +102,22 @@ export class EntryCalculator {
             tp,
             tpPct,
             horizonMin,
-            riskPct: this.config.position.baseRiskPct, // 1%
+            riskPct,
             isValid: true
         };
     }
 
+
     private emptyResult(): EntryResult {
-        return { 
-            entryType: 'market', 
-            entryPrice: 0, 
-            sl: 0, 
-            tp: [], 
-            tpPct: [], 
-            horizonMin: 0, 
-            riskPct: 0, 
-            isValid: false 
+        return {
+            entryType: 'market',
+            entryPrice: 0,
+            sl: 0,
+            tp: [],
+            tpPct: [],
+            horizonMin: 0,
+            riskPct: 0,
+            isValid: false
         };
     }
 }

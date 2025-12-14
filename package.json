@@ -1,8 +1,8 @@
 {
-  "name": "pump-scout-bot",
+  "name": "crypto-bot",
   "version": "1.0.0",
   "type": "commonjs",
-  "description": "Binance Futures pump detection bot",
+  "description": "Binance Futures analyzer bot",
   "scripts": {
     "test": "jest",
     "dev": "tsx watch src/main.ts",
@@ -23,6 +23,7 @@
     "dotenv": "^16.4.0",
     "express": "^5.1.0",
     "node-telegram-bot-api": "^0.64.0",
+    "pg": "^8.16.3",
     "reflect-metadata": "^0.2.2",
     "sqlite3": "^5.1.6",
     "tsx": "^4.16.0",
@@ -36,6 +37,7 @@
     "@types/express": "^5.0.5",
     "@types/jest": "^30.0.0",
     "@types/node-telegram-bot-api": "^0.64.0",
+    "@types/pg": "^8.16.0",
     "@types/winston": "^2.4.4",
     "@types/ws": "^8.5.10",
     "@typescript-eslint/eslint-plugin": "^7.0.0",

@@ -44,8 +44,7 @@ export class MomentumModule extends BaseModule {
         let baseScore = this.scaledTanh(m, this.config.scaleFactor);
 
         const deviation = (currentPrice - features.emaSlow) / features.atr;
-        
-        // FIX: Локальный контекст
+
         const predicateContext = {
             currentPrice,
             lastClosedEmaDiff: this.lastClosedEmaDiff,
@@ -71,7 +70,7 @@ export class MomentumModule extends BaseModule {
                 } else {
                     totalScore += scenario.baseScore;
                 }
-                
+
                 if (scenario.reliability > reliability) reliability = scenario.reliability;
                 scenario.tags.forEach(t => activeTags.add(t));
             }
@@ -83,8 +82,8 @@ export class MomentumModule extends BaseModule {
         }
 
         if (!isReversal) {
-            const isAligned = (totalScore > 0 && currentPrice > features.emaSlow) || 
-                              (totalScore < 0 && currentPrice < features.emaSlow);
+            const isAligned = (totalScore > 0 && currentPrice > features.emaSlow) ||
+                (totalScore < 0 && currentPrice < features.emaSlow);
             if (Math.abs(totalScore) > 0.3 && !isAligned) {
                 activeTags.add('price_counter_trend');
                 reliability -= 0.2;

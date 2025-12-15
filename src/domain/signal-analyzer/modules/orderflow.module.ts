@@ -16,12 +16,12 @@ export class OrderflowModule extends BaseModule {
     private dCVDHistory: number[] = [];
     private readonly historySize = 50;
     private lastProcessedTime = 0;
+    private absorptionHistory: { ts: number, type: 'buy' | 'sell' }[] = [];
 
     analyze(features: Features, bars: (BarData | AggregatedBar)[], marketContext?: any): ModuleOutput {
         const currentBar = bars[bars.length - 1];
         if (!currentBar) return this.createOutput(0, 0, ['no_data']);
 
-        // 1. UPDATE STATE
         if (currentBar.ts > this.lastProcessedTime) {
             if (this.lastProcessedTime !== 0) {
                 this.dCVDHistory.push(features.dCVD);
@@ -30,7 +30,6 @@ export class OrderflowModule extends BaseModule {
             this.lastProcessedTime = currentBar.ts;
         }
 
-        // 2. PREPARE CONTEXT
         const rawStd = this.calculateStd(this.dCVDHistory);
         const minStd = Math.max(features.buyVol * 0.05, 5000);
         const effectiveStd = Math.max(rawStd, minStd);
@@ -39,7 +38,6 @@ export class OrderflowModule extends BaseModule {
             ? (features.atr * 0.1) / currentBar.c 
             : 0.0005;
 
-        // FIX: Локальный контекст
         const predicateContext = {
             effectiveStd,
             flatThreshold,
@@ -47,7 +45,6 @@ export class OrderflowModule extends BaseModule {
             marketContext
         };
 
-        // 3. BASE CALCULATION
         const flowNorm = clamp(features.flowImb, -1, 1);
         const dCVDNorm = features.dCVD / effectiveStd;
         const dCVDComponent = clamp((sigmoid(dCVDNorm) * 2) - 1, -1, 1);
@@ -59,26 +56,13 @@ export class OrderflowModule extends BaseModule {
             this.config.dcvdWeight * dCVDComponent +
             this.config.volZWeight * volComponent;
 
-        // 4. SCENARIO ENGINE
         let totalScore = Math.tanh(this.config.tanhScale * rawMathScore);
         let maxReliability = 0.6;
         const activeTags = new Set<string>();
 
-        let overrideTriggered = false;
-
         for (const scenario of OrderflowScenarios) {
-            // FIX: Передаем predicateContext
             const isMatch = scenario.conditions.every(c => c(features, predicateContext));
             if (isMatch) {
-                if (scenario.tags.includes('hidden_selling_wall') || scenario.tags.includes('hidden_buying_wall')) {
-                    totalScore = scenario.baseScore;
-                    overrideTriggered = true;
-                } else {
-                    if (!overrideTriggered) {
-                         totalScore = (totalScore + scenario.baseScore) / 2;
-                    }
-                }
-
                 if (scenario.reliability > maxReliability) maxReliability = scenario.reliability;
                 scenario.tags.forEach(t => activeTags.add(t));
             }

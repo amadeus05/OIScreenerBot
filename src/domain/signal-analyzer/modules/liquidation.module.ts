@@ -10,7 +10,7 @@ import { LiquidationScenarios } from '../rules/scenarios/liquidation.scenarios';
 export class LiquidationModule extends BaseModule {
     readonly name = 'liquidations' as const;
     private readonly config = MODULE_CONFIG.liquidations;
-    
+
     private readonly historySize = 1000;
     private historyIntensityLong: number[] = [];
     private historyIntensityShort: number[] = [];
@@ -38,22 +38,22 @@ export class LiquidationModule extends BaseModule {
 
         const currentOI = currentBar.oi || currentBar.v || 1;
         const liqs = currentBar.liquidations || { long: 0, short: 0 };
-        
+
         const intensityLong = liqs.long / currentOI;
         const intensityShort = liqs.short / currentOI;
-        
-        const threshLong = this.historyIntensityLong.length > 50 
+
+        const threshLong = this.historyIntensityLong.length > 50
             ? this.calculatePercentile(this.historyIntensityLong, 0.98) : Infinity;
-        const threshShort = this.historyIntensityShort.length > 50 
+        const threshShort = this.historyIntensityShort.length > 50
             ? this.calculatePercentile(this.historyIntensityShort, 0.98) : Infinity;
 
         const isHugeLong = intensityLong > threshLong;
         const isHugeShort = intensityShort > threshShort;
 
         // Velocity & Acceleration
-        const getSumLiq = (n: number, type: 'short' | 'long') => 
+        const getSumLiq = (n: number, type: 'short' | 'long') =>
             bars.slice(-n).reduce((acc, b) => acc + (b.liquidations?.[type] || 0), 0);
-        
+
         const rateShort3m = getSumLiq(3, 'short') / 3;
         const rateShort10m = getSumLiq(10, 'short') / 10;
         const isShortCascadeAccel = rateShort3m > (rateShort10m * 2.5) && isHugeShort;

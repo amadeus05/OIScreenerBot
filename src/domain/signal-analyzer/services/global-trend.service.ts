@@ -2,128 +2,191 @@ import { IMarketDataRepository } from '../../interfaces/services.interface';
 import { SmartCandle } from '../../interfaces/market-data.interface';
 import { MarketContext, TrendState, RiskLevel, AssetMetric } from '../types/context';
 import { Logger } from '../../../shared/logger';
-import { calculateATR, calculateEMA } from '../utils/rolling-stats'; // Импортируем ваши утилиты
+import { calculateATR, calculateEMA } from '../utils/rolling-stats';
 
-// Конфигурация теперь опирается на множители ATR, а не фиксированные проценты
 const CONFIG = {
-    HISTORY_LENGTH: 50,      // Сколько свечей запрашивать
-    EMA_PERIOD: 20,          // Период трендовой средней
-    ATR_PERIOD: 14,          // Период ATR для динамических порогов
-
-    // Множители ATR для определения состояний
-    THRESHOLD_TREND: 1.0,    // Отклонение > 1 ATR = Тренд
-    THRESHOLD_CRASH: 3.5,    // Движение > 3.5 ATR = Crash/Pump (Экстремум)
-    THRESHOLD_VOLATILE: 2.0  // Свеча размером > 2 ATR = Высокая волатильность
+    HISTORY_LENGTH: 150, // Увеличили для надежности
+    EMA_PERIOD_LOCAL: 20,
+    EMA_PERIOD_GLOBAL: 200,
+    ATR_PERIOD: 14,
+    
+    // Порог волатильности (candle range > 2.5 ATR = Extreme Volatility)
+    THRESHOLD_VOL_EXTREME: 2.5 
 };
+
+// Настройки порогов (в ATR)
+const THRESHOLDS = {
+    // Импульс (PUMP/CRASH) - высший приоритет
+    impulseEntry: 3.5, 
+    impulseExit: 1.5,  
+
+    // Тренд (UP/DOWN)
+    trendEntry: 1.0,   
+    trendExit: 0.5,    // Расширили с 0.3 до 0.5, чтобы держать откаты
+};
+
+// Тайминги подтверждения (в барах)
+const CONFIRMATION = {
+    impulse: 2, // 2 бара подряд для подтверждения пампа
+    trend: 4,   // 4 бара для подтверждения тренда
+    exit: 1     // Выход почти мгновенный (безопасность)
+};
+
+// Внутреннее состояние актива
+interface SymbolState {
+    confirmed: TrendState;      // Текущий официальный тренд
+    candidate: TrendState;      // Кандидат на смену
+    candidateDuration: number;  // Сколько баров держится кандидат
+    duration: number;           // Сколько баров держится confirmed
+    volatilityAvg: number;      // EMA волатильности
+}
 
 export class GlobalTrendService {
     private readonly logger = new Logger('GlobalTrend');
 
-    constructor(
-        private readonly marketDataRepo: IMarketDataRepository
-    ) { }
+    // Хранилище состояния
+    private states = new Map<string, SymbolState>();
+
+    constructor(private readonly marketDataRepo: IMarketDataRepository) { }
 
     public async analyze(): Promise<MarketContext> {
-        // Запрашиваем историю
         const btcCandles = this.marketDataRepo.getHistory('BTCUSDT', CONFIG.HISTORY_LENGTH);
         const ethCandles = this.marketDataRepo.getHistory('ETHUSDT', CONFIG.HISTORY_LENGTH);
 
-        // Проверка достаточности данных
-        if (btcCandles.length < CONFIG.EMA_PERIOD || ethCandles.length < CONFIG.EMA_PERIOD) {
+        if (btcCandles.length < CONFIG.EMA_PERIOD_GLOBAL || ethCandles.length < CONFIG.EMA_PERIOD_GLOBAL) {
             return this.getNeutralContext('Insufficient Data (Warming up)');
         }
 
-        // Анализируем активы с использованием ATR и EMA
         const btc = this.analyzeAsset('BTCUSDT', btcCandles);
         const eth = this.analyzeAsset('ETHUSDT', ethCandles);
 
-        // --- 1. Анализ Корреляции ---
-        // Считаем корреляцию сломанной, только если тренды строго противоположны (UP vs DOWN)
-        // Игнорируем FLAT vs UP/DOWN, так как это просто временная рассинхронизация
+        // Корреляция
         const isBrokenCorrelation =
             (btc.trend === 'UP' && eth.trend === 'DOWN') ||
             (btc.trend === 'DOWN' && eth.trend === 'UP');
 
-        // --- 2. Определение Глобального Тренда ---
-        let globalTrend = btc.trend;
+        // Определение глобального тренда
+        // Приоритет BTC, но если ETH в PUMP/CRASH, учитываем это как риск
+        let globalTrend: TrendState = 'FLAT';
+        
+        if (btc.trend === 'PUMP' || eth.trend === 'PUMP') globalTrend = 'PUMP';
+        else if (btc.trend === 'CRASH' || eth.trend === 'CRASH') globalTrend = 'CRASH';
+        else if (btc.trend === eth.trend) globalTrend = btc.trend;
+        else globalTrend = btc.trend !== 'FLAT' ? btc.trend : eth.trend; // Верим активу, который не во флэте
 
-        // Если BTC флэтит, смотрим на ETH (он часто опережает)
-        if (btc.trend === 'FLAT' && eth.trend !== 'FLAT') {
-            globalTrend = eth.trend;
-        }
-
-        // Приоритет экстремальным состояниям
-        if (btc.trend === 'CRASH' || eth.trend === 'CRASH') globalTrend = 'CRASH';
-        else if (btc.trend === 'PUMP' || eth.trend === 'PUMP') globalTrend = 'PUMP';
-
-        // --- 3. Оценка Уровня Риска ---
+        // Расчет RiskLevel
         let riskLevel: RiskLevel = 'LOW';
+        const isExtremeVol = btc.isVolatile || eth.isVolatile;
 
         if (globalTrend === 'CRASH' || globalTrend === 'PUMP') {
             riskLevel = 'EXTREME';
+        } else if (isExtremeVol) {
+            riskLevel = 'EXTREME';
         } else if (isBrokenCorrelation) {
             riskLevel = 'HIGH';
-        } else if (btc.isVolatile || eth.isVolatile) {
+        } else if (globalTrend !== 'FLAT') {
             riskLevel = 'MEDIUM';
         }
 
-        // --- 4. Формирование Разрешений (Permissions) ---
+        // Логируем важные изменения макро-состояния
+        // (в реальном проекте здесь стоит добавить проверку "изменилось ли состояние", чтобы не спамить лог)
+        
         const permissions = this.calculatePermissions(globalTrend, riskLevel, isBrokenCorrelation);
 
-        return {
-            btc,
-            eth,
-            globalTrend,
-            riskLevel,
-            isBrokenCorrelation,
-            permissions
-        };
+        return { btc, eth, globalTrend, riskLevel, isBrokenCorrelation, permissions };
     }
 
     private analyzeAsset(symbol: string, candles: SmartCandle[]): AssetMetric {
-        // Подготовка массивов данных для мат. функций
+        // 1. Calculate Indicators
         const closes = candles.map(c => c.ohlc.c);
         const highs = candles.map(c => c.ohlc.h);
         const lows = candles.map(c => c.ohlc.l);
-
         const current = candles[candles.length - 1];
 
-        // 1. Считаем технические индикаторы (используем утилиты rolling-stats)
         const atr = calculateATR(highs, lows, closes, CONFIG.ATR_PERIOD);
-        const ema = calculateEMA(closes, CONFIG.EMA_PERIOD);
-
-        // Защита от деления на ноль, если ATR еще не посчитался
         const safeAtr = atr > 0 ? atr : current.ohlc.c * 0.005;
+        
+        const emaLocal = calculateEMA(closes, CONFIG.EMA_PERIOD_LOCAL);
+        const emaGlobal = calculateEMA(closes, CONFIG.EMA_PERIOD_GLOBAL);
 
-        // 2. Рассчитываем метрики относительно ATR (Z-score подход)
-        const deviation = (current.ohlc.c - ema) / safeAtr; // На сколько ATR цена ушла от средней
-        const candleRange = (current.ohlc.h - current.ohlc.l) / safeAtr; // Размер свечи в ATR
-        const change5m = (current.ohlc.c - candles[candles.length - 6].ohlc.c); // Изменение за 5 мин (абсолютное)
+        const deviationLocal = (current.ohlc.c - emaLocal) / safeAtr;
+        const deviationGlobal = (current.ohlc.c - emaGlobal) / safeAtr;
+        
+        const prevClose = candles[Math.max(0, candles.length - 6)].ohlc.c;
+        const change5m = current.ohlc.c - prevClose;
         const change5mInAtr = change5m / safeAtr;
+        
+        const candleRange = (current.ohlc.h - current.ohlc.l) / safeAtr;
 
-        // 3. Определение состояния (Trend State)
-        let trend: TrendState = 'FLAT';
+        // 2. Load State
+        let state = this.states.get(symbol);
+        if (!state) {
+            state = { 
+                confirmed: 'FLAT', 
+                candidate: 'FLAT', 
+                candidateDuration: 0, 
+                duration: 0, 
+                volatilityAvg: candleRange 
+            };
+        }
+        state.volatilityAvg = (state.volatilityAvg * 0.9) + (candleRange * 0.1);
 
-        // Сначала проверяем экстремумы (Pump/Crash) по импульсу за 5 минут
-        if (change5mInAtr <= -CONFIG.THRESHOLD_CRASH) trend = 'CRASH';
-        else if (change5mInAtr >= CONFIG.THRESHOLD_CRASH) trend = 'PUMP';
+        // 3. Detect Raw Signal (Instantaneous)
+        let rawSignal: TrendState = 'FLAT';
+
+        // A. Impulse Layer (Pump/Crash)
+        if (change5mInAtr >= THRESHOLDS.impulseEntry) rawSignal = 'PUMP';
+        else if (change5mInAtr <= -THRESHOLDS.impulseEntry) rawSignal = 'CRASH';
+        // Hysteresis Exit for Impulse
+        else if (state.confirmed === 'PUMP' && change5mInAtr >= THRESHOLDS.impulseExit) rawSignal = 'PUMP';
+        else if (state.confirmed === 'CRASH' && change5mInAtr <= -THRESHOLDS.impulseExit) rawSignal = 'CRASH';
+        
+        // B. Trend Layer (If not Impulse)
         else {
-            // Если экстремума нет, смотрим тренд по EMA
-            // Используем гистерезис: нужно отклониться на 1 ATR, чтобы считать трендом
-            if (deviation > CONFIG.THRESHOLD_TREND) trend = 'UP';
-            else if (deviation < -CONFIG.THRESHOLD_TREND) trend = 'DOWN';
-            else trend = 'FLAT';
+            const isUp = deviationLocal >= THRESHOLDS.trendEntry && deviationGlobal > 0;
+            const isDown = deviationLocal <= -THRESHOLDS.trendEntry && deviationGlobal < 0;
+
+            if (isUp) rawSignal = 'UP';
+            else if (isDown) rawSignal = 'DOWN';
+            
+            // Hysteresis Exit for Trend
+            // Если мы уже в тренде, держим его до снижения отклонения ниже 0.5 ATR
+            if (state.confirmed === 'UP' && deviationLocal >= THRESHOLDS.trendExit) rawSignal = 'UP';
+            if (state.confirmed === 'DOWN' && deviationLocal <= -THRESHOLDS.trendExit) rawSignal = 'DOWN';
         }
 
-        const isVolatile = candleRange > CONFIG.THRESHOLD_VOLATILE;
+        // 4. Candidate Logic (Persistence)
+        if (rawSignal === state.candidate) {
+            state.candidateDuration++;
+        } else {
+            state.candidate = rawSignal;
+            state.candidateDuration = 1;
+        }
+
+        // 5. State Transition (Confirmation)
+        const requiredBars = (rawSignal === 'PUMP' || rawSignal === 'CRASH') 
+            ? CONFIRMATION.impulse 
+            : (rawSignal === 'FLAT' ? CONFIRMATION.exit : CONFIRMATION.trend);
+
+        if (state.candidateDuration >= requiredBars) {
+            if (state.confirmed !== state.candidate) {
+                this.logger.info(`🔄 Trend Change [${symbol}]: ${state.confirmed} -> ${state.candidate} (Vol: ${state.volatilityAvg.toFixed(2)} ATR)`);
+                state.confirmed = state.candidate;
+                state.duration = 0;
+            } else {
+                state.duration++;
+            }
+        }
+
+        // Save State
+        this.states.set(symbol, state);
 
         return {
             symbol,
-            trend,
-            // Для совместимости оставляем % изменения, но внутри логики используем ATR
-            changePct5m: (change5m / candles[candles.length - 6].ohlc.c),
-            priceVsEma: deviation, // Теперь это Deviation in ATR units
-            isVolatile
+            trend: state.confirmed,
+            changePct5m: (change5m / prevClose),
+            priceVsEma: deviationLocal,
+            isVolatile: state.volatilityAvg > CONFIG.THRESHOLD_VOL_EXTREME
         };
     }
 
@@ -132,37 +195,21 @@ export class GlobalTrendService {
         let allowShort = true;
         let reason = 'Market Normal';
 
-        // 1. Экстремальные сценарии (Hard Block)
         if (trend === 'CRASH') {
-            allowLong = false; // Ловить падающие ножи на панике запрещено
-            allowShort = true;
+            allowLong = false;
             reason = 'PANIC DUMP (Crash Protection)';
-        }
-        else if (trend === 'PUMP') {
-            allowLong = true;
-            allowShort = false; // Шортить параболу запрещено
+        } else if (trend === 'PUMP') {
+            allowShort = false;
             reason = 'PANIC PUMP (Trend Protection)';
-        }
-        // 2. Высокий риск / Раскорреляция (Soft Warning)
-        else if (risk === 'HIGH' || risk === 'EXTREME') {
-            // Мы НЕ блокируем сделки полностью, так как это может быть просто волатильность.
-            // Но мы передаем причину, чтобы Gatekeepers могли потребовать более высокий Confidence.
+        } else if (risk === 'EXTREME') {
+            allowLong = false;
+            allowShort = false;
+            reason = 'Extreme Volatility (Side-line)';
+        } else if (risk === 'HIGH') {
             reason = brokenCorr ? 'Correlation Broken (Caution)' : 'High Volatility';
-
-            // Опционально: можно запретить торговлю, если риск EXTREME, но тренд FLAT (пила)
-            if (trend === 'FLAT' && risk === 'EXTREME') {
-                allowLong = false;
-                allowShort = false;
-                reason = 'Extreme Chopping (Side-line)';
-            }
-        }
-        // 3. Нормальный тренд (UP/DOWN)
-        else if (trend === 'UP') {
-            // Разрешаем шорты (allowShort = true), так как это могут быть разворотные стратегии (SFP, Oversold).
-            // Но помечаем, что тренд восходящий.
+        } else if (trend === 'UP') {
             reason = 'Uptrend (Counter-trend allowed with high conf)';
-        }
-        else if (trend === 'DOWN') {
+        } else if (trend === 'DOWN') {
             reason = 'Downtrend (Counter-trend allowed with high conf)';
         }
 
@@ -171,13 +218,6 @@ export class GlobalTrendService {
 
     private getNeutralContext(msg: string): MarketContext {
         const n: AssetMetric = { symbol: 'N/A', trend: 'FLAT', changePct5m: 0, priceVsEma: 0, isVolatile: false };
-        return {
-            btc: n,
-            eth: n,
-            globalTrend: 'FLAT',
-            riskLevel: 'LOW',
-            isBrokenCorrelation: false,
-            permissions: { allowLong: true, allowShort: true, reason: msg }
-        };
+        return { btc: n, eth: n, globalTrend: 'FLAT', riskLevel: 'LOW', isBrokenCorrelation: false, permissions: { allowLong: true, allowShort: true, reason: msg } };
     }
 }

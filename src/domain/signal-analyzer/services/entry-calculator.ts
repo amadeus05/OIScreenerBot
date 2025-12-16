@@ -1,5 +1,3 @@
-// src/domain/signal-analyzer/services/entry-calculator.ts
-
 import { TradeAction, EntryType, BarData, AggregatedBar, Features } from '../types';
 import { DEFAULT_CONFIG } from '../types/config';
 import { MarketRegime } from './regime-supervisor';
@@ -11,19 +9,23 @@ export interface EntryResult {
     tp: number[];
     tpPct: number[];
     horizonMin: number;
-    riskPct: number;
+    
+    // === ОБНОВЛЕННЫЕ ПОЛЯ ДЛЯ СИНХРОНИЗАЦИИ ===
+    riskPct: number;          // % риска от депозита
+    positionSizeUsd: number;  // Итоговый объем позиции в $ (Margin * Leverage)
+    quantity: number;         // Количество монет (для ордера)
+    
+    expectedPnL: number;      // Ожидаемый PnL при TP1 (Netto, с учетом комиссий)
+    feesInfo: {               // Метаданные для дебага
+        entryFee: number;
+        exitFeeSl: number;
+        exitFeeTp: number;
+    };
+    
     isValid: boolean;
     reason?: string;
 }
 
-/**
- * EntryCalculator
- * =================
- * ❗ СТРОГО ПОЛНАЯ ОБРАТНАЯ СОВМЕСТИМОСТЬ
- * - НИ ОДИН тип, интерфейс, импорт или сигнатура НЕ изменены
- * - Изменена ТОЛЬКО внутренняя логика TAKE PROFIT
- * - Старое поведение полностью сохранено для НЕ-pump сценариев
- */
 export class EntryCalculator {
     private readonly config = DEFAULT_CONFIG;
 
@@ -32,7 +34,8 @@ export class EntryCalculator {
         bars: (BarData | AggregatedBar)[],
         features: Features,
         confidence: number,
-        regime: MarketRegime = 'RANGING'
+        regime: MarketRegime = 'RANGING',
+        portfolioBalance: number = this.config.position.defaultPortfolioSize // Можно прокинуть реальный баланс
     ): EntryResult {
         if (action === 'NO_TRADE' || bars.length < 5) {
             return this.emptyResult();
@@ -42,20 +45,20 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // ==============================
-        // ENTRY (НЕ ТРОНУТО)
-        // ==============================
+        // 1. ENTRY PRICE
         let entryPrice = currentBar.c;
         let entryType: EntryType = 'market';
+        let entryFeeRate = this.config.fees.taker; // По умолчанию маркет = тейкер
 
+        // Если используем лимитный вход (смещение)
         if (this.config.technical.entryOffsetAtrMult > 0) {
-            entryPrice -= (direction * features.atr * this.config.technical.entryOffsetAtrMult);
+            const offset = features.atr * this.config.technical.entryOffsetAtrMult;
+            // Для Long лимитка ниже цены, для Short выше
+            entryPrice -= (direction * offset);
             entryType = 'limit';
         }
-
-        // ==============================
-        // STOP LOSS (НЕ ТРОНУТО)
-        // ==============================
+        
+        // 2. STOP LOSS (Structural + ATR)
         const lookback = this.config.technical.slStructuralBars || 2;
         const relevantBars = bars.slice(-lookback);
         const recentHigh = Math.max(...relevantBars.map(b => b.h));
@@ -75,71 +78,115 @@ export class EntryCalculator {
             slPrice = Math.min(structuralSl, entryPrice + maxSlDist);
         }
 
+        // Защита от слишком близкого стопа (минимум 0.3%)
         const minSlDist = entryPrice * 0.003;
         if (Math.abs(entryPrice - slPrice) < minSlDist) {
             slPrice = entryPrice - (direction * minSlDist);
         }
 
-        const risk = Math.abs(entryPrice - slPrice);
-
-        // ==============================
-        // TAKE PROFIT (ИСПРАВЛЕНО)
-        // ==============================
-        // 🎯 Pump Pullback Mean Reversion
-        // Условие максимально консервативное, чтобы НЕ сломать старую логику
-
+        // 3. TAKE PROFIT (С сохранением старой логики + Pump)
         const isPumpPullback = (
             features?.pChange30m !== undefined &&
             Math.abs(features.pChange30m) >= 0.08
         );
 
+        // Дистанция риска (без учета плеча)
+        const priceDistanceToSl = Math.abs(entryPrice - slPrice); 
+        
         let tp: number[];
-        let tpPct: number[];
-
+        
         if (isPumpPullback) {
-            // 🔥 ТВОЯ СТРАТЕГИЯ: откат 3–5% ВНУТРИ ПАМПА
+            // Adaptive R:R
             tp = [
-                entryPrice * (isLong ? 1.03 : 0.97),
-                entryPrice * (isLong ? 1.05 : 0.95)
+                entryPrice + (direction * priceDistanceToSl * 1.5),
+                entryPrice + (direction * priceDistanceToSl * 3.0)
             ];
-
-            tpPct = [3, 5];
         } else {
-            // 🧠 СТАРАЯ ЛОГИКА — БЕЗ ИЗМЕНЕНИЙ
-            let tpRatios = this.config.technical.tpRatios;
+            // Classic Logic
+            let tpRatios = this.config.technical.tpRatios; // [1.5, 3.0] default
             if (regime === 'TRENDING') tpRatios = [3.0, 6.0];
-            if (regime === 'RANGING') tpRatios = [1.5, 3.0];
-
-            tp = tpRatios.map(ratio => entryPrice + (direction * risk * ratio));
-            tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
+            
+            tp = tpRatios.map(ratio => entryPrice + (direction * priceDistanceToSl * ratio));
         }
+        
+        // 4. POSITION SIZING & RISK CALCULATION (СИНХРОНИЗАЦИЯ)
+        // =======================================================
+        
+        // 4.1 Рассчитываем допустимый риск на сделку в долларах
+        let riskPct = this.config.position.baseRiskPct;
+        riskPct *= confidence; // Корректируем по уверенности
+        if (regime === 'VOLATILE') riskPct *= 0.7; // Снижаем в волатильности
+        
+        const riskAmountUsd = portfolioBalance * (riskPct / 100);
 
-        // ==============================
-        // VALIDATION (НЕ ТРОНУТО)
-        // ==============================
-        const slPct = Math.abs((slPrice - entryPrice) / entryPrice) * 100;
+        // 4.2 % движения цены до стопа
+        const stopLossPct = priceDistanceToSl / entryPrice;
+
+        // 4.3 Размер позиции (Full Notional Value) = Риск ($) / % до стопа
+        let positionSizeUsd = riskAmountUsd / stopLossPct;
+
+        // 4.4 Применяем лимиты
+        positionSizeUsd = Math.min(positionSizeUsd, this.config.position.maxPositionSizeUsd);
+        
+        // Округляем до разумного (Quantity precision не знаем, берем грубо)
+        const quantity = positionSizeUsd / entryPrice;
+        
+        // 5. FEE & NET PNL CALCULATION (REAL BINANCE MATH)
+        // =================================================
+        
+        // Вход (Taker)
+        const entryFee = positionSizeUsd * this.config.fees.taker;
+        
+        // Выход по SL (Market = Taker)
+        const exitFeeSl = positionSizeUsd * this.config.fees.taker;
+        
+        // Выход по TP (Limit = Maker)
+        const exitFeeTp = positionSizeUsd * this.config.fees.maker;
+
+        // Расчет "Чистого" (Net) Профита для TP1
+        const grossProfitTp1 = (Math.abs(entryPrice - tp[0]) / entryPrice) * positionSizeUsd;
+        const netProfitTp1 = grossProfitTp1 - (entryFee + exitFeeTp);
+
+        // GUARD: Fee Check
+        if (entryFee + exitFeeTp > grossProfitTp1 * 0.3) {
+             return { ...this.emptyResult(), isValid: false, reason: `Fees too high (${(entryFee + exitFeeTp).toFixed(2)}$ vs Profit ${grossProfitTp1.toFixed(2)}$)` };
+        }
+        
+        // GUARD: Minimum Profit ($1)
+        if (netProfitTp1 < 1.0) {
+             return { ...this.emptyResult(), isValid: false, reason: `Net profit too low (${netProfitTp1.toFixed(2)}$)` };
+        }
+        
+        // GUARD: Stop Loss width
+        const slPct = stopLossPct * 100;
         if (slPct > 5.0) {
             return { ...this.emptyResult(), isValid: false, reason: 'StopLoss too wide (>5%)' };
         }
 
-        // ==============================
-        // HORIZON & RISK (НЕ ТРОНУТО)
-        // ==============================
-        const estimatedMinutes = Math.ceil((risk * 2) / (features.atr || 1));
+        // 6. FINAL OUTPUT
+        const estimatedMinutes = Math.ceil((priceDistanceToSl * 2) / (features.atr || 1));
         const horizonMin = Math.min(Math.max(30, estimatedMinutes), 180);
-
-        let riskPct = this.config.position.baseRiskPct;
-        riskPct *= confidence;
-        if (regime === 'VOLATILE') riskPct *= 0.7;
+        const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
 
         return {
             entryType,
-            entryPrice,
+            entryPrice, // Возвращаем базовую цену (без slippage, т.к. slippage это факт исполнения)
             sl: slPrice,
             tp,
             tpPct,
             horizonMin,
-            riskPct,
+            riskPct, // Возвращаем итоговый % риска, который использовался
+            
+            // Новые поля
+            positionSizeUsd,
+            quantity,
+            expectedPnL: netProfitTp1,
+            feesInfo: {
+                entryFee,
+                exitFeeSl,
+                exitFeeTp
+            },
+            
             isValid: true
         };
     }
@@ -153,6 +200,10 @@ export class EntryCalculator {
             tpPct: [],
             horizonMin: 0,
             riskPct: 0,
+            positionSizeUsd: 0,
+            quantity: 0,
+            expectedPnL: 0,
+            feesInfo: { entryFee: 0, exitFeeSl: 0, exitFeeTp: 0 },
             isValid: false
         };
     }

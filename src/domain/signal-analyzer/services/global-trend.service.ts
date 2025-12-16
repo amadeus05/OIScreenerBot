@@ -199,7 +199,7 @@ export class GlobalTrendService {
             allowLong = false;
             reason = 'PANIC DUMP (Crash Protection)';
         } else if (trend === 'PUMP') {
-            allowShort = false;
+            allowShort = true;
             reason = 'PANIC PUMP (Trend Protection)';
         } else if (risk === 'EXTREME') {
             allowLong = false;

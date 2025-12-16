@@ -65,6 +65,8 @@ export interface Features {
     liquidationBias?: number;
     absorptionBias?: number;
     oi?: number;
+    
+    pChange30m: number; // новый параметр
 }
 
 export interface MultiTimeframeFeatures {
@@ -81,6 +83,7 @@ export interface ModuleOutput {
 }
 
 export type ModuleName =
+    | 'meanReversion'
     | 'momentum'
     | 'orderflow'
     | 'oi'

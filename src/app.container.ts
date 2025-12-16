@@ -15,7 +15,7 @@ import { SignalVerifierService } from './infrastructure/services/signal-verifier
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 // Signal Analyzer (isolated module)
-import { LevelsModule, LiquidationModule, MomentumModule, OIModule, OrderflowModule, SignalAnalyzerService } from './domain/signal-analyzer';
+import { MeanReversionModule, OIModule, SignalAnalyzerService } from './domain/signal-analyzer';
 import { GlobalTrendService } from './domain/signal-analyzer/services/global-trend.service'; // Обновленный путь
 
 // Telegram
@@ -27,6 +27,12 @@ import { SignalHandler } from './presentation/telegram/handlers/signal.handler';
 import { CreateTriggerUseCase } from './application/use-cases/create-trigger.use-case';
 import { GetTriggersUseCase } from './application/use-cases/get-triggers.use-case';
 import { RemoveTriggerUseCase } from './application/use-cases/remove-trigger.use-case';
+
+import { TradeGatekeeper } from './domain/signal-analyzer/gatekeeper/trade-gatekeeper';
+import { TrendAlignmentGate } from './domain/signal-analyzer/gatekeeper/gates/trend-alignment.gate';
+import { AntiSpamGate } from './domain/signal-analyzer/gatekeeper/gates/anti-spam.gate';
+import { MeanReversionGate } from './domain/signal-analyzer/gatekeeper/gates/mean-reversion.gate';
+import { TradingSessionGate } from './domain/signal-analyzer/gatekeeper/gates/trading-session.gate';
 import { PumpScoutBot } from './app';
 
 export function registerDependencies(): void {
@@ -75,12 +81,23 @@ export function registerDependencies(): void {
   container.bind(RemoveTriggerUseCase, () => new RemoveTriggerUseCase(container.get('ITriggerRepository')));
 
   // --- 6.5. Signal Analyzer (isolated module) ---
+
+  // 1. Регистрируем массив гейтов
+  container.bind('IGates', () => [
+    new TrendAlignmentGate(),
+    new MeanReversionGate(),
+    new TradingSessionGate(),
+    new AntiSpamGate()
+  ]);
+
+  // 2. Регистрируем сам Gatekeeper
+  container.bind('TradeGatekeeper', () => new TradeGatekeeper(
+      container.get('IGates')
+  ));
+
   container.bind('IModules', () => [
-      new MomentumModule(),
-      new OrderflowModule(),
-      new OIModule(),
-      new LiquidationModule(),
-      new LevelsModule()
+      // new OIModule(),
+      new MeanReversionModule(),
   ]);
   container.bind(GlobalTrendService, () => new GlobalTrendService(
     container.get('IMarketDataRepository') // Ему нужен доступ к данным
@@ -112,7 +129,8 @@ export function registerDependencies(): void {
   ))
 
   container.bind(SignalAnalyzerService, () => new SignalAnalyzerService(
-    container.get('IModules') // Явная передача (хотя декоратор должен сработать и так, но для надежности)
+    container.get('IModules') ,
+    container.get('TradeGatekeeper')
   ));
 
   container.bind(GlobalTrendService, () => new GlobalTrendService(

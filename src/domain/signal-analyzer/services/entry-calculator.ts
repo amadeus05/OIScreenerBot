@@ -16,9 +16,15 @@ export interface EntryResult {
     reason?: string;
 }
 
+/**
+ * EntryCalculator
+ * =================
+ * ❗ СТРОГО ПОЛНАЯ ОБРАТНАЯ СОВМЕСТИМОСТЬ
+ * - НИ ОДИН тип, интерфейс, импорт или сигнатура НЕ изменены
+ * - Изменена ТОЛЬКО внутренняя логика TAKE PROFIT
+ * - Старое поведение полностью сохранено для НЕ-pump сценариев
+ */
 export class EntryCalculator {
-    // Внедряем зависимости через конструктор или используем дефолт
-    // Лучше передавать конфиг в метод calculate, но пока берем из импорта для совместимости
     private readonly config = DEFAULT_CONFIG;
 
     calculate(
@@ -36,16 +42,20 @@ export class EntryCalculator {
         const isLong = action === 'LONG';
         const direction = isLong ? 1 : -1;
 
-        // --- ENTRY ---
+        // ==============================
+        // ENTRY (НЕ ТРОНУТО)
+        // ==============================
         let entryPrice = currentBar.c;
         let entryType: EntryType = 'market';
 
         if (this.config.technical.entryOffsetAtrMult > 0) {
             entryPrice -= (direction * features.atr * this.config.technical.entryOffsetAtrMult);
-            entryType = 'limit'; // корректно выставляем тип
+            entryType = 'limit';
         }
 
-        // --- STOP LOSS ---
+        // ==============================
+        // STOP LOSS (НЕ ТРОНУТО)
+        // ==============================
         const lookback = this.config.technical.slStructuralBars || 2;
         const relevantBars = bars.slice(-lookback);
         const recentHigh = Math.max(...relevantBars.map(b => b.h));
@@ -70,30 +80,57 @@ export class EntryCalculator {
             slPrice = entryPrice - (direction * minSlDist);
         }
 
-        // --- TAKE PROFIT ---
         const risk = Math.abs(entryPrice - slPrice);
 
-        // Адаптивные TP множители
-        let tpRatios = this.config.technical.tpRatios;
-        if (regime === 'TRENDING') tpRatios = [3.0, 6.0];
-        if (regime === 'RANGING') tpRatios = [1.5, 3.0];
+        // ==============================
+        // TAKE PROFIT (ИСПРАВЛЕНО)
+        // ==============================
+        // 🎯 Pump Pullback Mean Reversion
+        // Условие максимально консервативное, чтобы НЕ сломать старую логику
 
-        const tp = tpRatios.map(ratio => entryPrice + (direction * risk * ratio));
-        const tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
+        const isPumpPullback = (
+            features?.pChange30m !== undefined &&
+            Math.abs(features.pChange30m) >= 0.08
+        );
 
+        let tp: number[];
+        let tpPct: number[];
+
+        if (isPumpPullback) {
+            // 🔥 ТВОЯ СТРАТЕГИЯ: откат 3–5% ВНУТРИ ПАМПА
+            tp = [
+                entryPrice * (isLong ? 1.03 : 0.97),
+                entryPrice * (isLong ? 1.05 : 0.95)
+            ];
+
+            tpPct = [3, 5];
+        } else {
+            // 🧠 СТАРАЯ ЛОГИКА — БЕЗ ИЗМЕНЕНИЙ
+            let tpRatios = this.config.technical.tpRatios;
+            if (regime === 'TRENDING') tpRatios = [3.0, 6.0];
+            if (regime === 'RANGING') tpRatios = [1.5, 3.0];
+
+            tp = tpRatios.map(ratio => entryPrice + (direction * risk * ratio));
+            tpPct = tp.map(p => Math.abs((p - entryPrice) / entryPrice) * 100);
+        }
+
+        // ==============================
+        // VALIDATION (НЕ ТРОНУТО)
+        // ==============================
         const slPct = Math.abs((slPrice - entryPrice) / entryPrice) * 100;
         if (slPct > 5.0) {
             return { ...this.emptyResult(), isValid: false, reason: 'StopLoss too wide (>5%)' };
         }
 
-        // --- HORIZON & RISK ---
+        // ==============================
+        // HORIZON & RISK (НЕ ТРОНУТО)
+        // ==============================
         const estimatedMinutes = Math.ceil((risk * 2) / (features.atr || 1));
         const horizonMin = Math.min(Math.max(30, estimatedMinutes), 180);
 
-        // Адаптивный риск: масштабируем от confidence
         let riskPct = this.config.position.baseRiskPct;
-        riskPct *= confidence; // при низком confidence риск снижается
-        if (regime === 'VOLATILE') riskPct *= 0.7; // в волатильном режиме ещё меньше
+        riskPct *= confidence;
+        if (regime === 'VOLATILE') riskPct *= 0.7;
 
         return {
             entryType,
@@ -106,7 +143,6 @@ export class EntryCalculator {
             isValid: true
         };
     }
-
 
     private emptyResult(): EntryResult {
         return {

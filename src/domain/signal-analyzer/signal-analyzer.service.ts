@@ -60,21 +60,26 @@ export class SignalAnalyzerService {
         this.logger.info(`✅ SignalAnalyzerService started with ${this.modules.length} modules.`);
     }
 
-    public analyze(symbol: string, bars: BarData[], marketContext?: MarketContext): SignalResult {
+    /**
+     * Main analysis method.
+     * @param currentBalance - Текущий баланс портфеля (для точного расчета риск-менеджмента)
+     */
+    public analyze(
+        symbol: string, 
+        bars: BarData[], 
+        marketContext?: MarketContext,
+        currentBalance?: number // <--- 1. НОВЫЙ АРГУМЕНТ
+    ): SignalResult {
         try {
-            // 1. Data Aggregation (Optimized)
+            // 1. Data Aggregation
             const aggregator = this.getOrCreateAggregator(symbol);
-            
-            // 🔥 UPDATED: Эффективное добавление данных. 
-            // Не перебираем все 500 свечей каждый раз, берем только новые.
             const lastTs = aggregator.getLastTs();
-            const newBars = bars.filter(b => b.ts > lastTs); // Берем строго более новые
+            const newBars = bars.filter(b => b.ts > lastTs);
             
-            // Если пришли только обновления старого бара (ts == lastTs), то берем последний из input
             if (newBars.length === 0 && bars.length > 0) {
                 const lastInput = bars[bars.length - 1];
                 if (lastInput.ts === lastTs) {
-                    aggregator.addBar(lastInput); // Обновляем текущий бар
+                    aggregator.addBar(lastInput); 
                 }
             } else {
                 newBars.forEach(b => aggregator.addBar(b));
@@ -109,20 +114,22 @@ export class SignalAnalyzerService {
                 return this.createEmptyResult(symbol, aggregation.vetoReason || 'No setup detected', aggregation.rawScore, moduleOutputs);
             }
 
-            // 5. Entry
+            // 5. Entry Calculation
+            // 🔥 Передаем currentBalance в калькулятор
             const entryResult = this.entryCalculator.calculate(
                 aggregation.action,
                 bars1m,
                 features,
                 1.0, 
-                regimeAnalysis.regime
+                regimeAnalysis.regime,
+                currentBalance // <--- 2. ПРОКИДЫВАЕМ ДАЛЬШЕ
             );
 
             if (!entryResult.isValid) {
                 return this.createEmptyResult(symbol, entryResult.reason || 'Invalid Entry Parameters', aggregation.rawScore, moduleOutputs);
             }
 
-            // 6. Result
+            // 6. Result Construction
             const result: SignalResult = {
                 ts: new Date().toISOString(),
                 symbol,
@@ -141,12 +148,18 @@ export class SignalAnalyzerService {
                     `REGIME_${regimeAnalysis.regime}`
                 ],
                 riskPct: entryResult.riskPct,
+
+                // 🔥 3. ВАЖНО: Возвращаем рассчитанный объем, чтобы бэктест не гадал
+                quantity: entryResult.quantity,
+                positionSizeUsd: entryResult.positionSizeUsd,
+
                 marketRegime: regimeAnalysis.regime,
                 meta: {
                     rawScore: aggregation.rawScore,
                     moduleAgreement: aggregation.moduleAgreement,
                     regime: regimeAnalysis.regime,
-                    globalTrend: marketContext?.globalTrend // Add to meta for debugging
+                    globalTrend: marketContext?.globalTrend,
+                    isBrokenCorrelation: marketContext?.isBrokenCorrelation
                 },
             };
 
@@ -186,36 +199,22 @@ export class SignalAnalyzerService {
         });
     }
 
-    /**
-     * 🔥 UPDATED: Метод проверки прогретости.
-     * Используется сканером, чтобы не вызывать warmUp каждую минуту.
-     */
     public isWarmedUp(symbol: string): boolean {
         const agg = this.symbolAggregators.get(symbol);
-        // Считаем прогретым, если есть агрегатор и в нем достаточно баров для статистики
         return !!agg && agg.getBarCounts().bars1m >= 50; 
     }
 
-    /**
-     * 🔥 UPDATED: Метод прогрева.
-     * Теперь реально запускает hydrate для FeatureEngine и модулей.
-     */
     public warmUp(symbol: string, bars: BarData[]): void {
         if (bars.length < 50) return;
         
         const aggregator = this.getOrCreateAggregator(symbol);
         const featureEngine = this.getOrCreateFeatureEngine(symbol);
 
-        // 1. Заполняем агрегатор историей
         bars.forEach(bar => aggregator.addBar(bar));
 
-        // 2. Получаем чистый массив
         const cleanBars = aggregator.getBars('1m') as BarData[];
 
-        // 3. Гидратируем FeatureEngine (Z-Scores, Rolling Stats)
         featureEngine.hydrate(cleanBars);
-
-        // 4. Гидратируем Модули (OI History и т.д.)
         this.modules.forEach(module => module.hydrate(cleanBars));
 
         this.logger.debug(`🔥 Warmed up ${symbol}: ${cleanBars.length} bars processed (Stats Hydrated).`);

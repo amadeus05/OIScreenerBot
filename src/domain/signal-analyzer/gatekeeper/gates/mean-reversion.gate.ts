@@ -44,6 +44,17 @@ export class MeanReversionGate extends BaseGate {
             return this.reject(`No volume confirmation (Z: ${features.volZ.toFixed(2)})`);
         }
 
+        if (signal.action === 'SHORT' && features.cvdDominance30m > 0.05) {
+             return this.reject(`Aggressive 30m Buying (CVD Dom: ${(features.cvdDominance30m * 100).toFixed(1)}%)`);
+        }
+        
+        // 🔥 НОВОЕ: Проверка МАКСИМАЛЬНОГО импульса (God Candle Protection)
+        // Если цена выросла более чем на 12% за 30 минут — это ракета, не шортим.
+        // Обычно такие движения продолжаются.
+        if (signal.action === 'SHORT' && impulseStrength > 0.12) {
+             return this.reject(`Pump too strong for reversal (${(impulseStrength * 100).toFixed(2)}%)`);
+        }
+
         return this.allow();
     }
 }

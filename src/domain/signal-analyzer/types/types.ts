@@ -67,6 +67,7 @@ export interface Features {
     oi?: number;
     
     pChange30m: number; // новый параметр
+    cvdDominance30m: number;
 }
 
 export interface MultiTimeframeFeatures {
@@ -108,6 +109,10 @@ export interface SignalResult {
     modules: Record<ModuleName, number>;
     reasonTags: string[];
     riskPct: number;
+
+    quantity?: number;          // <-- НУЖНО ДЛЯ БЭКТЕСТА
+    positionSizeUsd?: number;   // <-- НУЖНО ДЛЯ БЭКТЕСТА
+
     meta: {
         rawScore: number;
         moduleAgreement: number;

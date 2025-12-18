@@ -106,6 +106,25 @@ export class FeatureEngine {
         const { isLiqSignal, liqBias, liqStrength } = this.analyzeLiquidations(current, current.oi || 1);
         const { isAbsorption, absorptionBias } = this.analyzeAbsorption(current, deltaZ, volZ);
 
+
+        let sumVol30 = 0;
+        let sumDelta30 = 0;
+        const lookback30 = Math.min(bars.length, 30);
+        
+        for (let i = 0; i < lookback30; i++) {
+            const b = bars[bars.length - 1 - i];
+            
+            // 🔴 ОШИБКА БЫЛА ЗДЕСЬ: sumVol30 += b.v; 
+            // Мы должны привести объем к долларам, так как дельта в долларах!
+            
+            // 🟢 ИСПРАВЛЕНИЕ: Умножаем объем на цену закрытия
+            sumVol30 += (b.v * b.c); 
+            
+            sumDelta30 += b.delta;
+        }
+        
+        const cvdDominance30m = safeDivide(sumDelta30, Math.max(sumVol30, EPS));
+
         return {
             buyVol,
             sellVol,
@@ -125,7 +144,8 @@ export class FeatureEngine {
             liquidationBias: liqBias,
             absorptionFlag: isAbsorption,
             absorptionBias,
-            pChange30m
+            pChange30m,
+            cvdDominance30m,
         };
     }
 
@@ -223,7 +243,8 @@ export class FeatureEngine {
             liquidationBias: 0,
             absorptionFlag: false,
             absorptionBias: 0,
-            pChange30m: 0
+            pChange30m: 0,
+            cvdDominance30m: 0,
         };
     }
 

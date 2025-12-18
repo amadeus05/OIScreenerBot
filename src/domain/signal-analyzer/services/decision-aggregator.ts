@@ -67,7 +67,7 @@ export class DecisionAggregator {
 
         // 3. Determine Action
         let action: TradeAction = 'NO_TRADE';
-        if (Math.abs(rawScore) >= this.threshold) {
+        if (Math.abs(rawScore) >= this.threshold && rawScore !== 0) {
             action = rawScore > 0 ? 'LONG' : 'SHORT';
         }
 
@@ -84,32 +84,6 @@ export class DecisionAggregator {
         }
         const moduleAgreement = totalActiveWeight > 0 ? agreeingWeight / totalActiveWeight : 0;
 
-
-        // // 5. HARD VETO GUARDS
-
-        // // Veto 1: No SHORT in PUMP
-        // if (context?.globalTrend === 'PUMP' && action === 'SHORT') {
-        //     return {
-        //         rawScore: 0,
-        //         action: 'NO_TRADE',
-        //         moduleAgreement: 0,
-        //         vetoReason: 'no_short_in_pump'
-        //     };
-        // }
-
-        // // Veto 2: Volatility Gate (Quiet or Chaos)
-        // const volZ = features.volZ;
-        // if (volZ < -1.0 || volZ > 4.0) {
-        //     return {
-        //         rawScore: 0,
-        //         action: 'NO_TRADE',
-        //         moduleAgreement: 0,
-        //         vetoReason: 'extreme_volatility_gate'
-        //     };
-        // }
-
-        // 6. GLOBAL PERMISSIONS CHECK (The only "Veto" left)
-        // Checks config settings like "Allow Longs" / "Allow Shorts"
         if (context && action !== 'NO_TRADE') {
             const isLongRestricted = action === 'LONG' && !context.permissions.allowLong;
             const isShortRestricted = action === 'SHORT' && !context.permissions.allowShort;

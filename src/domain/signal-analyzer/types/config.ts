@@ -101,19 +101,19 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
 
     decision: {
         // Снижаем порог входа. Рынок шумный, идеальных 0.55 мало.
-        threshold: 0.60, // Было 0.55
+        threshold: 0.00, // Было 0.55
         noTradeZone: 0.05, // Уменьшаем мертвую зону
     },
 
     position: {
         baseRiskPct: 1.0,
-        maxOpenTrades: 5, // Разрешаем больше одновременных сделок
+        maxOpenTrades: 10, // Разрешаем больше одновременных сделок
         // Разрешаем входить в сделки со средней уверенностью
-        minConfidence: 0.80, // Было 0.55
+        minConfidence: 0.00, // Было 0.55
 
         // Новые поля для синхронизации
         defaultPortfolioSize: 100, // База для расчета, если не знаем баланс
-        maxPositionSizeUsd: 80,
+        maxPositionSizeUsd: 300,
         leverage: 3
     },
 
@@ -153,7 +153,7 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
         // === ИЗМЕНЕНИЕ 1: Лимитный вход ===
         // Ставим лимитку на 0.15 ATR лучше цены закрытия.
         // Это фильтрует "FOMO-входы" на хаях свечи.
-        entryOffsetAtrMult: 0.20, // Было 0.0
+        entryOffsetAtrMult: 0.00, // Было 0.0
 
         // === ИЗМЕНЕНИЕ 2: Чуть больше воздуха стопу ===
         // Было 0.4 - слишком тесно, выбивает шумом.

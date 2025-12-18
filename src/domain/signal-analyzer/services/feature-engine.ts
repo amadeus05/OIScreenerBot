@@ -36,6 +36,26 @@ export class FeatureEngine {
         this.liqStats = new RollingStats(100);
     }
 
+    /**
+     * 🔥 UPDATED: Метод для принудительной загрузки истории (Cold Start Fix)
+     * Прогоняет исторические бары через статистику, чтобы Z-Score был готов сразу.
+     */
+    public hydrate(bars: (BarData | AggregatedBar)[]): void {
+        this.reset();
+        
+        if (bars.length < 2) return;
+
+        // Гарантируем хронологический порядок
+        const sorted = [...bars].sort((a, b) => a.ts - b.ts);
+
+        // Прогоняем через updateRollingStats
+        // Это заполнит окна (window) значениями, и z-score будет считаться корректно
+        for (const bar of sorted) {
+            this.updateRollingStats(bar);
+            this.lastProcessedTime = bar.ts;
+        }
+    }
+
     computeFeatures(bars: (BarData | AggregatedBar)[]): Features {
         if (bars.length < 2) {
             return this.emptyFeatures();
@@ -44,7 +64,7 @@ export class FeatureEngine {
         const current = bars[bars.length - 1];
         const prev = bars[bars.length - 2];
 
-        // идемпотентное обновление статистик
+        // Идемпотентное обновление статистик для Live режима
         if (current.ts > this.lastProcessedTime) {
             if (this.lastProcessedTime !== 0) {
                 this.updateRollingStats(prev);
@@ -81,11 +101,7 @@ export class FeatureEngine {
         // --- Trend EMA (гибкий период из конфига) ---
         const trendEma = calculateEMA(closes, TREND_EMA_PERIOD || 200);
 
-        const pChange30m = this.computeTwentyMinChange(bars)
-
-        if (pChange30m >= 0.08) {
-            // console.log(pChange30m)
-        }
+        const pChange30m = this.computeTwentyMinChange(bars);
 
         const { isLiqSignal, liqBias, liqStrength } = this.analyzeLiquidations(current, current.oi || 1);
         const { isAbsorption, absorptionBias } = this.analyzeAbsorption(current, deltaZ, volZ);
@@ -115,16 +131,19 @@ export class FeatureEngine {
 
     private computeTwentyMinChange(bars: (BarData | AggregatedBar)[], interval: number = 30): number {
         const current = bars[bars.length - 1];
+        // Для точного расчета берем Open, если свеча зеленая, иначе Close (консервативно)
+        // Или просто Close для простоты. Оставим текущую логику.
         const isUp = current.c >= current.o;
-
         const currentBase = isUp ? current.o : current.c;
 
-        const targetTs = current.ts - interval * 60 * 1000; // ts в миллисекундах
+        const targetTs = current.ts - interval * 60 * 1000;
+        // Ищем бар, который был 30 минут назад (или ближайший к нему)
+        // Reverse поиск быстрее, так как ищем с конца
         const pastBar = [...bars].reverse().find(b => b.ts <= targetTs);
 
         if (!pastBar) return 0;
 
-        const pastBase = isUp ? pastBar.o : pastBar.c;
+        const pastBase = isUp ? pastBar.o : pastBar.c; // Сравниваем сравнимое
 
         return safeDivide(currentBase - pastBase, pastBase);
     }
@@ -152,11 +171,10 @@ export class FeatureEngine {
         const l = bar.liquidations || { long: 0, short: 0 };
         const totalLiq = l.long + l.short;
 
-        // стабильный порог: используем перцентиль и минимальный пол
         const baseThreshold = this.liqStats.size() > 20
             ? this.liqStats.percentile(0.95)
             : currentOI * 0.001;
-        const threshold = Math.max(baseThreshold, 1); // не позволяем порогу быть слишком маленьким
+        const threshold = Math.max(baseThreshold, 1);
 
         if (totalLiq < threshold) {
             return { isLiqSignal: false, liqBias: 0, liqStrength: 0 };
@@ -184,12 +202,10 @@ export class FeatureEngine {
 
         const Z_THRESH = 1.2;
 
-        // Поглощение покупателей (бычья абсорбция)
         if (deltaZ < -Z_THRESH && closePos > 0.4 && volZ > 0.7 && lowerWickRatio > 0.25 && bodyRatio < 0.6) {
             return { isAbsorption: true, absorptionBias: 1 };
         }
 
-        // Поглощение продавцов (медвежья абсорбция)
         if (deltaZ > Z_THRESH && closePos < 0.6 && volZ > 0.7 && upperWickRatio > 0.25 && bodyRatio < 0.6) {
             return { isAbsorption: true, absorptionBias: -1 };
         }

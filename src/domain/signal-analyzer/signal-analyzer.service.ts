@@ -12,7 +12,6 @@ import {
     DEFAULT_CONFIG,
     Features,
     AggregatedBar,
-    ModuleName,
 } from './types';
 import {
     TimeframeAggregator,
@@ -35,9 +34,9 @@ export class SignalAnalyzerService {
     private readonly aggregator: TimeframeAggregator;
     private readonly featureEngine: FeatureEngine;
     private readonly decisionAggregator: DecisionAggregator;
-    private readonly entryCalculator: EntryCalculator; // Расчет SL/TP
-    private readonly regimeSupervisor: RegimeSupervisor; // Веса (Волатильность vs Тренд)
-    private readonly gatekeeper: TradeGatekeeper; // Финальный фильтр (Anti-Spam)
+    private readonly entryCalculator: EntryCalculator;
+    private readonly regimeSupervisor: RegimeSupervisor;
+    private readonly gatekeeper: TradeGatekeeper;
 
     // --- State ---
     private symbolAggregators = new Map<string, TimeframeAggregator>();
@@ -52,45 +51,51 @@ export class SignalAnalyzerService {
         this.config = config;
         this.gatekeeper = gatekeeper;
 
-        // Инициализация "движков"
         this.aggregator = new TimeframeAggregator();
         this.featureEngine = new FeatureEngine(config);
-
-        // Агрегатор решений (суммирует баллы от сценариев)
         this.decisionAggregator = new DecisionAggregator(config.weights, config.decision.threshold);
-
-        // Калькулятор входа (ATR стопы, уровни)
         this.entryCalculator = new EntryCalculator();
-
-        // Супервизор режима (определяет Panic/Quiet для весов)
         this.regimeSupervisor = new RegimeSupervisor(config.weights);
 
         this.logger.info(`✅ SignalAnalyzerService started with ${this.modules.length} modules.`);
     }
 
     public analyze(symbol: string, bars: BarData[], marketContext?: MarketContext): SignalResult {
-        // Минимальное требование к истории
-        if (bars.length < 50) return this.createEmptyResult(symbol, 'Insufficient data');
-
         try {
-            // 1. Data & Feature Engineering
-            // ==========================================
+            // 1. Data Aggregation (Optimized)
             const aggregator = this.getOrCreateAggregator(symbol);
-            bars.forEach(b => aggregator.addBar(b)); // Важно: в реале добавляем только новые, тут упрощено
+            
+            // 🔥 UPDATED: Эффективное добавление данных. 
+            // Не перебираем все 500 свечей каждый раз, берем только новые.
+            const lastTs = aggregator.getLastTs();
+            const newBars = bars.filter(b => b.ts > lastTs); // Берем строго более новые
+            
+            // Если пришли только обновления старого бара (ts == lastTs), то берем последний из input
+            if (newBars.length === 0 && bars.length > 0) {
+                const lastInput = bars[bars.length - 1];
+                if (lastInput.ts === lastTs) {
+                    aggregator.addBar(lastInput); // Обновляем текущий бар
+                }
+            } else {
+                newBars.forEach(b => aggregator.addBar(b));
+            }
 
-            const bars1m = aggregator.getBars('1m', 120) as BarData[]; // Берем чуть больше для индикаторов
+            // 2. Data Checks
+            const barCounts = aggregator.getBarCounts();
+            if (barCounts.bars1m < 50) {
+                return this.createEmptyResult(symbol, 'Insufficient data');
+            }
+
+            const bars1m = aggregator.getBars('1m', 120) as BarData[];
             const featureEngine = this.getOrCreateFeatureEngine(symbol);
             const features = featureEngine.computeFeatures(bars1m);
             const currentPrice = bars1m[bars1m.length - 1].c;
 
-            // 2. Regime Detection (Определяем веса)
-            // ==========================================
-            // Если рынок в ПАНИКЕ -> веса MeanReversion и Liquidation повышаются
+            // 3. Regime
             const regimeAnalysis = this.regimeSupervisor.analyze(features, currentPrice);
             this.decisionAggregator.setWeights(regimeAnalysis.adjustedWeights);
 
-            // 3. Run All Modules (Scenario Checks)
-            // ==========================================
+            // 4. Modules
             const analysisContext: AnalysisContext = {
                 regime: regimeAnalysis.regime,
                 globalTrend: marketContext?.globalTrend || 'FLAT',
@@ -98,23 +103,18 @@ export class SignalAnalyzerService {
             };
 
             const moduleOutputs = this.runModules(features, bars1m, analysisContext);
-            // 4. Aggregation (Sum Scores)
-            // ==========================================
-            // Здесь решается конфликт: Momentum (+0.6) + MeanReversion (-0.9) = Short (-0.3)
             const aggregation = this.decisionAggregator.aggregate(moduleOutputs, features, marketContext);
 
             if (aggregation.action === 'NO_TRADE') {
                 return this.createEmptyResult(symbol, aggregation.vetoReason || 'No setup detected', aggregation.rawScore, moduleOutputs);
             }
 
-            // 5. Entry Calculation (SL / TP / Position Size)
-            // ==========================================
-            // Рассчитываем динамический стоп по ATR и тейк
+            // 5. Entry
             const entryResult = this.entryCalculator.calculate(
                 aggregation.action,
                 bars1m,
                 features,
-                1.0, // Confidence теперь всегда 1.0, если сценарий сработал (он сам по себе надежен)
+                1.0, 
                 regimeAnalysis.regime
             );
 
@@ -122,8 +122,7 @@ export class SignalAnalyzerService {
                 return this.createEmptyResult(symbol, entryResult.reason || 'Invalid Entry Parameters', aggregation.rawScore, moduleOutputs);
             }
 
-            // 6. Result Construction
-            // ==========================================
+            // 6. Result
             const result: SignalResult = {
                 ts: new Date().toISOString(),
                 symbol,
@@ -134,7 +133,7 @@ export class SignalAnalyzerService {
                 tp: entryResult.tp,
                 tpPct: entryResult.tpPct,
                 horizonMin: entryResult.horizonMin,
-                confidence: 1.0, // Сценарий = 100% доверие к логике
+                confidence: 1.0,
                 confidenceLevel: 'HIGH',
                 modules: this.decisionAggregator.getModuleScoresRecord(moduleOutputs),
                 reasonTags: [
@@ -147,12 +146,11 @@ export class SignalAnalyzerService {
                     rawScore: aggregation.rawScore,
                     moduleAgreement: aggregation.moduleAgreement,
                     regime: regimeAnalysis.regime,
+                    globalTrend: marketContext?.globalTrend // Add to meta for debugging
                 },
             };
 
-            // 7. 🔥 GATEKEEPER (The Final Boss)
-            // ==========================================
-            // Проверка на спам, повторы сигналов и жесткие запреты
+            // 7. Gatekeeper
             const gateContext: GateContext = {
                 signal: result,
                 features: features,
@@ -166,7 +164,6 @@ export class SignalAnalyzerService {
                 return this.createEmptyResult(symbol, `Gatekeeper: ${gateVerdict.reason}`, aggregation.rawScore, moduleOutputs);
             }
 
-            // Успех! Запоминаем время
             this.lastSignalTimes.set(symbol, Date.now());
             this.logger.info(`🚀 SIGNAL [${symbol}]: ${result.action} @ ${result.entryPrice} | Score: ${aggregation.rawScore.toFixed(2)}`);
 
@@ -177,8 +174,6 @@ export class SignalAnalyzerService {
             return this.createEmptyResult(symbol, 'System Error');
         }
     }
-
-    // --- Helpers ---
 
     private runModules(features: Features, bars: (BarData | AggregatedBar)[], context: AnalysisContext): ModuleOutput[] {
         return this.modules.map(module => {
@@ -191,25 +186,39 @@ export class SignalAnalyzerService {
         });
     }
 
-    // WarmUp нужен для корректного расчета ATR/RSI перед стартом
+    /**
+     * 🔥 UPDATED: Метод проверки прогретости.
+     * Используется сканером, чтобы не вызывать warmUp каждую минуту.
+     */
+    public isWarmedUp(symbol: string): boolean {
+        const agg = this.symbolAggregators.get(symbol);
+        // Считаем прогретым, если есть агрегатор и в нем достаточно баров для статистики
+        return !!agg && agg.getBarCounts().bars1m >= 50; 
+    }
+
+    /**
+     * 🔥 UPDATED: Метод прогрева.
+     * Теперь реально запускает hydrate для FeatureEngine и модулей.
+     */
     public warmUp(symbol: string, bars: BarData[]): void {
-        if (bars.length < 20) return;
+        if (bars.length < 50) return;
+        
         const aggregator = this.getOrCreateAggregator(symbol);
         const featureEngine = this.getOrCreateFeatureEngine(symbol);
 
-        // Reset state
-        featureEngine.reset();
+        // 1. Заполняем агрегатор историей
+        bars.forEach(bar => aggregator.addBar(bar));
 
-        // Fast-forward history
-        // Оптимизация: не прогоняем модули на истории, только фичи
-        bars.forEach(bar => {
-            aggregator.addBar(bar);
-            // Периодически обновляем фичи, чтобы заполнить буферы индикаторов
-            // (можно делать реже для скорости, но для точности лучше каждый бар)
-        });
+        // 2. Получаем чистый массив
+        const cleanBars = aggregator.getBars('1m') as BarData[];
 
-        // Финальный прогон фичей, чтобы убедиться, что всё готово
-        featureEngine.computeFeatures(aggregator.getBars('1m', 100) as BarData[]);
+        // 3. Гидратируем FeatureEngine (Z-Scores, Rolling Stats)
+        featureEngine.hydrate(cleanBars);
+
+        // 4. Гидратируем Модули (OI History и т.д.)
+        this.modules.forEach(module => module.hydrate(cleanBars));
+
+        this.logger.debug(`🔥 Warmed up ${symbol}: ${cleanBars.length} bars processed (Stats Hydrated).`);
     }
 
     public clearSymbol(symbol: string): void {
@@ -251,7 +260,7 @@ export class SignalAnalyzerService {
             reasonTags: [reason],
             riskPct: 0,
             meta: { rawScore, moduleAgreement: 0, reason },
-            marketRegime: 'RANGING' // Default
+            marketRegime: 'RANGING'
         };
     }
 }

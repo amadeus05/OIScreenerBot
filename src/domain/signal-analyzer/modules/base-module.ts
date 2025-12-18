@@ -8,7 +8,6 @@ export interface AnalysisContext {
     regime: string;      // 'RANGING' | 'TRENDING' | 'VOLATILE'
     globalTrend: string; // 'UP' | 'DOWN' | 'FLAT'
     currentPrice: number;
-    // Можно расширять
 }
 
 export abstract class BaseModule {
@@ -16,15 +15,20 @@ export abstract class BaseModule {
 
     /**
      * Analyze features and return score with reliability
-     * @param features Computed features for current bar
-     * @param bars Recent bars for additional context
-     * @param context Global market context (Regime, BTC Trend, etc.)
      */
     abstract analyze(
         features: Features,
         bars: (BarData | AggregatedBar)[],
-        context?: AnalysisContext // <-- НОВЫЙ АРГУМЕНТ
+        context?: AnalysisContext
     ): ModuleOutput;
+
+    /**
+     * 🔥 UPDATED: Метод для гидратации состояния модуля из истории.
+     * Модули, имеющие внутренний стейт (OI, Levels), обязаны переопределить это.
+     */
+    public hydrate(bars: (BarData | AggregatedBar)[]): void {
+        // По умолчанию ничего не делаем, если модуль stateless (без состояния)
+    }
 
     protected createOutput(
         score: number,

@@ -37,6 +37,20 @@ export class MeanReversionGate extends BaseGate {
             return this.reject(`No significant impulse (${(impulseStrength * 100).toFixed(2)}% < ${(this.minImpulse * 100)}%)`);
         }
 
+        // 2.1 Анти-контртренд для слабых MR: если импульс слабее 5% и идем против EMA200, отбрасываем
+        const priceAboveTrend = features.emaFast > features.trendEma;
+        const priceBelowTrend = features.emaFast < features.trendEma;
+        const weakImpulse = impulseStrength < 0.05; // 5% за 30 минут считаем слабым для агрессивного разворота
+
+        if (weakImpulse) {
+            if (signal.action === 'SHORT' && priceAboveTrend) {
+                return this.reject('MR short blocked: weak impulse vs uptrend (EMA200)');
+            }
+            if (signal.action === 'LONG' && priceBelowTrend) {
+                return this.reject('MR long blocked: weak impulse vs downtrend (EMA200)');
+            }
+        }
+
         // 3. Подтверждение объемом
         // V-образные развороты требуют кульминации объема.
         // Если volZ < 0 (объем ниже среднего), рынок может просто дрейфовать дальше.

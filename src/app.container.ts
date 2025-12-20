@@ -15,7 +15,7 @@ import { SignalVerifierService } from './infrastructure/services/signal-verifier
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
 // Signal Analyzer (isolated module)
-import { MeanReversionModule, OIModule, SignalAnalyzerService } from './domain/signal-analyzer';
+import { OrderflowModule, MomentumModule, MeanReversionModule, OIModule, SignalAnalyzerService } from './domain/signal-analyzer';
 import { GlobalTrendService } from './domain/signal-analyzer/services/global-trend.service'; // Обновленный путь
 
 // Telegram
@@ -92,16 +92,18 @@ export function registerDependencies(): void {
 
   // 2. Регистрируем сам Gatekeeper
   container.bind('TradeGatekeeper', () => new TradeGatekeeper(
-      container.get('IGates')
+    container.get('IGates')
   ));
 
   container.bind('IModules', () => [
-      // new OIModule(),
-      new MeanReversionModule(),
+    // new OIModule(),
+    new MeanReversionModule(),
+    new OrderflowModule(),
+    new MomentumModule(),
   ]);
   container.bind(GlobalTrendService, () => new GlobalTrendService(
     container.get('IMarketDataRepository') // Ему нужен доступ к данным
-));
+  ));
 
   // --- 7. Application Entry ---
   container.bind(CommandHandler, () => new CommandHandler(
@@ -129,12 +131,12 @@ export function registerDependencies(): void {
   ))
 
   container.bind(SignalAnalyzerService, () => new SignalAnalyzerService(
-    container.get('IModules') ,
+    container.get('IModules'),
     container.get('TradeGatekeeper')
   ));
 
   container.bind(GlobalTrendService, () => new GlobalTrendService(
-      container.get('IMarketDataRepository')
+    container.get('IMarketDataRepository')
   ));
 
   container.bind(PumpScoutBot, () => new PumpScoutBot(

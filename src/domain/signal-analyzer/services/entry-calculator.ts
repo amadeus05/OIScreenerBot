@@ -139,14 +139,24 @@ export class EntryCalculator {
         const grossProfitTp1 = (Math.abs(entryPrice - tp[0]) / entryPrice) * positionSizeUsd;
         const netProfitTp1 = grossProfitTp1 - (entryFee + exitFeeTp);
 
+        // GUARD: Если расстояние до тейка меньше 0.6%, скорее всего комиссия съест прибыль
+        const expectedMovePct = Math.abs(tp[0] - entryPrice) / entryPrice;
+        if (expectedMovePct < 0.006) { // Меньше 0.6% движения
+             return { ...this.emptyResult(), isValid: false, reason: `Target too close (<0.6%), fees will kill profit` };
+        }
+
         // GUARD: Fees too high relative to profit
         if (entryFee + exitFeeTp > grossProfitTp1 * 0.4) {
              return { ...this.emptyResult(), isValid: false, reason: `Fees too high relative to profit` };
         }
         
-        // GUARD: Minimum Profit (Ослабили до 0.05$, чтобы тесты на $100 проходили)
-        if (netProfitTp1 < 0.05) {
-             return { ...this.emptyResult(), isValid: false, reason: `Net profit too low (${netProfitTp1.toFixed(2)}$)` };
+        // GUARD: Minimum Profit - $1 или 1% от депозита (выбираем большее)
+        const minProfitUsd = 1.0;
+        const minProfitPct = portfolioBalance * 0.01; // 1% от депозита
+        const minProfitRequired = Math.max(minProfitUsd, minProfitPct);
+        
+        if (netProfitTp1 < minProfitRequired) {
+             return { ...this.emptyResult(), isValid: false, reason: `Net profit too low (${netProfitTp1.toFixed(2)}$ < ${minProfitRequired.toFixed(2)}$)` };
         }
         
         // GUARD: Stop Loss width

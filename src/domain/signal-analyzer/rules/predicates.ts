@@ -73,8 +73,8 @@ export const Predicates = {
         IsOverbought: (f: Features, ctx: any) => (ctx?.deviation || 0) > 2.5,
         IsOversold: (f: Features, ctx: any) => (ctx?.deviation || 0) < -2.5,
         IsExtended: (f: Features, ctx: any) => Math.abs(ctx?.deviation || 0) > 1.5,
-        IsKindOfPump: (f: Features, ctx: any) => f.pChange30m >= 0.08,
-        IsKindOfDump: (f: Features, ctx: any) => f.pChange30m <= -0.08
+        IsKindOfPump: (f: Features, ctx: any) => f.pChange30m >= 0.05,  // было 0.08
+        IsKindOfDump: (f: Features, ctx: any) => f.pChange30m <= -0.05  // было -0.08
     },
 
     // --- LIQUIDATIONS ---

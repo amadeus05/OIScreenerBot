@@ -90,26 +90,27 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
     },
 
     weights: {
-        // Упор на поток ордеров и импульс (скальпинг)
-        orderflow: 0.40,
-        liquidations: 0.25,
-        levels: 0.10,     // Снижаем влияние уровней (на мемах их прошивают)
-        momentum: 0.20,   // Повышаем моментум (торгуем по движению)
-        oi: 0.10,
-        meanReversion: 1
+        // Новая комбинация модулей
+        orderflow: 0.45,      // основной источник силы (CVD, OI, flow)
+        meanReversion: 0.30,  // mean reversion (pump/dump exhaustion)
+        momentum: 0.25,       // momentum continuation
+        // Legacy (не используются, но оставляем для типизации)
+        liquidations: 0.00,
+        levels: 0.00,
+        oi: 0.00,
     },
 
     decision: {
-        // Снижаем порог входа. Рынок шумный, идеальных 0.55 мало.
-        threshold: 0.00, // Было 0.55
-        noTradeZone: 0.05, // Уменьшаем мертвую зону
+        // Баланс: не слишком строго, но и не слишком мягко
+        threshold: 0.45, // 0.35 — золотая середина
+        noTradeZone: 0.05,
     },
 
     position: {
         baseRiskPct: 1.0,
-        maxOpenTrades: 10, // Разрешаем больше одновременных сделок
+        maxOpenTrades: 3, // Разрешаем больше одновременных сделок
         // Разрешаем входить в сделки со средней уверенностью
-        minConfidence: 0.00, // Было 0.55
+        minConfidence: 0.70, // Было 0.55
 
         // Новые поля для синхронизации
         defaultPortfolioSize: 100, // База для расчета, если не знаем баланс
@@ -157,12 +158,12 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
 
         // === ИЗМЕНЕНИЕ 2: Чуть больше воздуха стопу ===
         // Было 0.4 - слишком тесно, выбивает шумом.
-        slAtrMultMin: 0.6, // Чуть шире минимальный стоп
-        slAtrMultMax: 1.2,
-        slStructuralBars: 5, // Смотрим на 3 свечи назад для поиска лоу, а не 2
+        slAtrMultMin: 2.0, // Чуть шире минимальный стоп
+        slAtrMultMax: 3.5,
+        slStructuralBars: 10, // Смотрим на 3 свечи назад для поиска лоу, а не 2
 
-        // Тейки оставляем агрессивными
-        tpRatios: [1.5, 3.0],
+        // Тейки: более агрессивный R:R для компенсации низкого winrate
+        tpRatios: [1.5, 3.0], // Было [1.5, 3.0] → минимум 2:1 R:R
     },
 };
 /**

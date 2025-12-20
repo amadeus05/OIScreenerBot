@@ -99,18 +99,18 @@ export class RegimeSupervisor {
      */
     private createRangingFallback(features: Features): RegimeAnalysis {
         // Если волатильность низкая (volZ < 1), мы уверены, что это RANGING.
-        // Если волатильность есть, но паттерны не совпали — уверенность ниже.
         const volatilityPenalty = Math.max(0, Math.min(0.5, features.volZ * 0.2));
         const confidence = 0.8 - volatilityPenalty;
 
-        // Ищем дефолтные веса для Ranging (можно взять из конфига или константы)
+        // 🔥 ИЗМЕНЕНИЕ: Жестко отключаем Momentum и OI во флэте
+        // Во флэте работают только MeanReversion (отскоки) и Levels (уровни)
         const rangingWeights: ModuleWeights = { 
-            meanReversion: 0.0,
-            orderflow: 0.40,
-            liquidations: 0.10,
-            levels: 0.40,
-            momentum: 0.05,
-            oi: 0.05,
+            meanReversion: 0.85, // Основной упор на возврат к среднему
+            orderflow: 0.15,     // Немного потока для подтверждения
+            liquidations: 0.0,
+            levels: 0.0,         
+            momentum: 0.00,      // ⛔ ОТКЛЮЧЕНО (было 0.05) - убирает ложные пробои
+            oi: 0.00,            // ⛔ ОТКЛЮЧЕНО (было 0.05)
         };
 
         return {

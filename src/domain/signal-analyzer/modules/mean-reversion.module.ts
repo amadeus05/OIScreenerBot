@@ -21,10 +21,15 @@ export class MeanReversionModule extends BaseModule {
     const exhaustionContext = {
       currentPrice: currentBar.c,
       marketContext,
+      // Detects exhaustion for BOTH pumps and dumps
       isExhausted:
         features.volZ > 2.5 ||
-        (features.pChange30m >= 0.08 && features.flowImb < 0.15) ||
-        (features.pChange30m >= 0.08 && features.dCVD < 0),
+        // PUMP exhaustion (for SHORT)
+        (features.pChange30m >= 0.05 && features.flowImb < 0.15) ||
+        (features.pChange30m >= 0.05 && features.dCVD < 0) ||
+        // DUMP exhaustion (for LONG) - symmetric logic
+        (features.pChange30m <= -0.05 && features.flowImb > -0.15) ||
+        (features.pChange30m <= -0.05 && features.dCVD > 0),
     };
 
     for (const scenario of MeanReversionScenarios) {

@@ -37,3 +37,5 @@ temp/
 # OS
 .DS_Store
 Thumbs.db
+
+/backtest-charts

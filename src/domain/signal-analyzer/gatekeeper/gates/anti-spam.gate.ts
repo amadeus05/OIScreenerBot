@@ -7,13 +7,15 @@ export class AntiSpamGate extends BaseGate {
     private readonly cooldownMs = 30 * 60 * 1000;
 
     evaluate(ctx: GateContext): GateResult {
-        const { lastSignalTs } = ctx;
+        const { lastSignalTs, currentTs } = ctx;
 
+        // Если нет рыночного времени текущей свечи — пропускаем (fail-open)
+        if (!currentTs) return this.allow();
         if (!lastSignalTs) return this.allow();
 
-        const now = Date.now();
-        if (now - lastSignalTs < this.cooldownMs) {
-            const minutesLeft = Math.ceil((this.cooldownMs - (now - lastSignalTs)) / 60000);
+        const elapsed = currentTs - lastSignalTs;
+        if (elapsed < this.cooldownMs) {
+            const minutesLeft = Math.ceil((this.cooldownMs - elapsed) / 60000);
             return this.reject(`Cooldown active (${minutesLeft}m left)`);
         }
 

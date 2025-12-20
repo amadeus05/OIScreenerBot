@@ -54,7 +54,7 @@ export class SignalAnalyzerService {
         this.aggregator = new TimeframeAggregator();
         this.featureEngine = new FeatureEngine(config);
         this.decisionAggregator = new DecisionAggregator(config.weights, config.decision.threshold);
-        this.entryCalculator = new EntryCalculator();
+        this.entryCalculator = new EntryCalculator(config);
         this.regimeSupervisor = new RegimeSupervisor(config.weights);
 
         this.logger.info(`✅ SignalAnalyzerService started with ${this.modules.length} modules.`);
@@ -71,6 +71,20 @@ export class SignalAnalyzerService {
         currentBalance?: number // <--- 1. НОВЫЙ АРГУМЕНТ
     ): SignalResult {
         try {
+            // === ЗАЩИТА ОТ МУСОРНЫХ МОНЕТ ===
+            // Защита от мусорных монет (работает и в тесте, и в лайве)
+            if (bars.length > 0) {
+                const lastBar = bars[bars.length - 1];
+                const minuteVolumeUsd = lastBar.v * lastBar.c; // Объем последней свечи в $
+                
+                // Если объем меньше 50k$ за минуту — до свидания
+                // (Для BTC/ETH это копейки, для щиткоинов — фильтр от "мертвого" рынка)
+                if (minuteVolumeUsd < 50_000) {
+                    return this.createEmptyResult(symbol, 'Low Liquidity Filter');
+                }
+            }
+            // ================================
+
             // 1. Data Aggregation
             const aggregator = this.getOrCreateAggregator(symbol);
             const lastTs = aggregator.getLastTs();
@@ -95,6 +109,7 @@ export class SignalAnalyzerService {
             const featureEngine = this.getOrCreateFeatureEngine(symbol);
             const features = featureEngine.computeFeatures(bars1m);
             const currentPrice = bars1m[bars1m.length - 1].c;
+            const currentTs = bars1m[bars1m.length - 1].ts;
 
             // 3. Regime
             const regimeAnalysis = this.regimeSupervisor.analyze(features, currentPrice);
@@ -116,11 +131,19 @@ export class SignalAnalyzerService {
 
             // 5. Entry Calculation
             // 🔥 Передаем currentBalance в калькулятор
+            const confidence = Math.min(
+                1,
+                Math.max(
+                    0.4,
+                    Math.abs(aggregation.rawScore) * 0.8 + aggregation.moduleAgreement * 0.2
+                )
+            );
+
             const entryResult = this.entryCalculator.calculate(
                 aggregation.action,
                 bars1m,
                 features,
-                1.0, 
+                confidence, 
                 regimeAnalysis.regime,
                 currentBalance // <--- 2. ПРОКИДЫВАЕМ ДАЛЬШЕ
             );
@@ -131,7 +154,7 @@ export class SignalAnalyzerService {
 
             // 6. Result Construction
             const result: SignalResult = {
-                ts: new Date().toISOString(),
+                ts: new Date(currentTs).toISOString(),
                 symbol,
                 action: aggregation.action,
                 entryType: entryResult.entryType,
@@ -168,7 +191,8 @@ export class SignalAnalyzerService {
                 signal: result,
                 features: features,
                 marketContext: marketContext,
-                lastSignalTs: this.lastSignalTimes.get(symbol) || 0
+                lastSignalTs: this.lastSignalTimes.get(symbol) || 0,
+                currentTs
             };
 
             const gateVerdict = this.gatekeeper.evaluate(gateContext);
@@ -177,7 +201,7 @@ export class SignalAnalyzerService {
                 return this.createEmptyResult(symbol, `Gatekeeper: ${gateVerdict.reason}`, aggregation.rawScore, moduleOutputs);
             }
 
-            this.lastSignalTimes.set(symbol, Date.now());
+            this.lastSignalTimes.set(symbol, currentTs);
             this.logger.info(`🚀 SIGNAL [${symbol}]: ${result.action} @ ${result.entryPrice} | Score: ${aggregation.rawScore.toFixed(2)}`);
 
             return result;

@@ -11,6 +11,7 @@ export interface GateContext {
     features: Features;
     marketContext?: MarketContext;
     lastSignalTs?: number; // Время последнего сигнала по этому символу
+    currentTs?: number;    // Время текущего бара/сигнала
 }
 
 export interface SignalGate {

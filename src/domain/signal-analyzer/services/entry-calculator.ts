@@ -3,7 +3,7 @@
 // ========================================================================
 
 import { TradeAction, EntryType, BarData, AggregatedBar, Features } from '../types';
-import { DEFAULT_CONFIG } from '../types/config';
+import { DEFAULT_CONFIG, SignalAnalyzerConfig } from '../types/config';
 import { MarketRegime } from './regime-supervisor';
 
 export interface EntryResult {
@@ -31,7 +31,11 @@ export interface EntryResult {
 }
 
 export class EntryCalculator {
-    private readonly config = DEFAULT_CONFIG;
+    private readonly config: SignalAnalyzerConfig;
+
+    constructor(config: SignalAnalyzerConfig = DEFAULT_CONFIG) {
+        this.config = config;
+    }
 
     calculate(
         action: TradeAction,

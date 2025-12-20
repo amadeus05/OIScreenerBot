@@ -241,9 +241,10 @@ async function runRealBacktest() {
             const maintenanceMargin = (pos.entryPrice * pos.quantity) * MAINT_MARGIN_RATE;
 
             if (currentMargin <= maintenanceMargin) {
-                balance -= (positionValue * LIQUIDATION_FEE);
-                tradeHistory.push({ symbol: pos.symbol, pnl: -pos.margin, reason: 'LIQUIDATION' });
-                console.log(`💀 LIQUIDATED [${pos.symbol}] @ ${worstPrice}. Lost Margin: -$${pos.margin.toFixed(2)}. Bal: $${balance.toFixed(2)}`);
+                const liquidationLoss = pos.margin + (positionValue * LIQUIDATION_FEE);
+                balance -= liquidationLoss;
+                tradeHistory.push({ symbol: pos.symbol, pnl: -liquidationLoss, reason: 'LIQUIDATION' });
+                console.log(`💀 LIQUIDATED [${pos.symbol}] @ ${worstPrice}. Lost: -$${liquidationLoss.toFixed(2)} (Margin: $${pos.margin.toFixed(2)} + Fee: $${(positionValue * LIQUIDATION_FEE).toFixed(2)}). Bal: $${balance.toFixed(2)}`);
                 activePositions.splice(i, 1);
                 continue;
             }

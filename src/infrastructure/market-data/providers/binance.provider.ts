@@ -20,14 +20,71 @@ const BINANCE_FUTURES_STREAM_BASE = 'wss://fstream.binance.com/stream';
 
 const BATCH_SIZE = 30;
 const KLINE_INTERVAL = '1m';
-const MAX_REQ_PER_SEC = 20;
+const MAX_REQ_PER_SEC = 38;
 const HTTP_TIMEOUT = 2000;
 
 // Список пар с принудительно низким приоритетом
 const LOW_PRIORITY_SYMBOLS = new Set([
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
   'TRXUSDT', 'LINKUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT', 'LTCUSDT',
-  'USDCUSDT', 'BUSDUSDT', 'EURUSDT'
+
+  // USD-pegged
+  'USDTUSDT',   // Tether (самый популярный)
+  'USDCUSDT',   // USD Coin (Circle)
+  'BUSDUSDT',   // Binance USD (deprecated с 2024)
+  'TUSDUSDT',   // TrueUSD
+  'USDPUSDT',   // Pax Dollar
+  'DAIUSDT',    // DAI (децентрализованный)
+  'FRAXUSDT',   // Frax
+  'USTCUSDT',   // TerraClassicUSD (crashed в 2022)
+  'FDUSDUSDT',  // First Digital USD (новый от Binance)
+  'PYUSDUSDT',  // PayPal USD
+  
+  // EUR-pegged
+  'EURUSDT',    // Euro стейблкоины
+  'EUROCUSDT',
+  
+  // Other fiats
+  'GBPUSDT',    // British Pound
+  'AUDUSDT',    // Australian Dollar (но часто это Audius токен!)
+  //===================================
+
+  // Очевидный мусор (малая капа, нет ликвидности)
+  'AERGOUSDT',      // AeroGo - кап ~$1M, объём $50k
+  'BASUSDT',        // Base Protocol - мёртвый проект
+  'BEATUSDT',       // ???
+  'FOLKSUSDT',      // Folks Finance - малая капа
+  'GIGGLEUSDT',     // Мем-коин
+  'ICNTUSDT',       // Iconomi - умирающий проект
+  'JELLYJELLYUSDT', // Мем-коин, малая ликвидность
+  'MERLUSDT',       // Merlin - новый, нестабильный
+  'PENGUUSDT',      // Pudgy Penguins - мем
+  'PIPPINUSDT',     // ???
+  'POWERUSDT',      // ???
+  'PROMPTUSDT',     // ???
+  'STABLEUSDT',     // ???
+  
+  // Высокорискованные (crashed проекты)
+  'LUNA2USDT',      // Terra 2.0 - после краха, дикая волатильность
+  'USTCUSDT',       // TerraClassic USD - crashed стейбл
+  'LUNCUSDT',       // Luna Classic - crashed
+  
+  // Мем-коины (огромный риск)
+  'SHIBUSDT',       // Shiba Inu
+  'PEPEUSDT',       // Pepe
+  'FLOKIUSDT',      // Floki
+  'BONKUSDT',       // Bonk
+
+  //==================== GRAY ZONE TRADE WITH CAREFYL!!!
+  'DOGEUSDT',  // Doge - ликвидный, но мем
+  'APTUSDT',   // Aptos - новый L1, волатильный
+  'SUIUSDT',   // Sui - новый L1, риск
+  'OPUSDT',    // Optimism - L2, норм ликвидность
+  'ARBUSDT',   // Arbitrum - L2, норм
+  'INJUSDT',   // Injective - DeFi, средняя капа
+  'FILUSDT',   // Filecoin - старый, но низкая ликвидность
+  'COMPUSDT',  // Compound - DeFi, малая капа
+  'AAVEUSDT',  // Aave - DeFi, норм ликвидность
 ]);
 
 interface SymbolState {
@@ -373,17 +430,43 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
 
   private selectOICandidates(): string[] {
     const now = Date.now();
-    const result: string[] = [];
+    const candidates: { symbol: string; urgency: number }[] = [];
+
     for (const [sym, p] of this.priorityMap.entries()) {
-      let interval = 15000;
-      if (p.priority === 1) interval = 60000;
-      else if (p.priority === 10) interval = 2000;
-      if (now - p.lastUpdated > interval) {
-        result.push(sym);
-        if (result.length >= MAX_REQ_PER_SEC) break;
+      // Определяем интервал
+      let interval = 15000; 
+      // Если монета в "низком приоритете" (BTC, ETH и т.д.) - обновляем реже (60 сек)
+      if (p.priority === 1) interval = 60000;      
+      // Если высокий приоритет - чаще (2 сек)
+      else if (p.priority === 10) interval = 2000; 
+
+      const elapsed = now - p.lastUpdated;
+
+      // Если пора обновлять
+      if (elapsed > interval) {
+        // Urgency (Срочность) = на сколько миллисекунд мы опаздываем
+        // Это ключевой момент: чем больше мы опоздали, тем выше позиция в очереди
+        candidates.push({ 
+          symbol: sym, 
+          urgency: elapsed - interval 
+        });
       }
     }
-    return result;
+
+    // Сортируем: сверху те, кто ждет дольше всех (самые "голодные")
+    // Это гарантирует, что ACEUSDT в конце списка не будет проигнорирован
+    candidates.sort((a, b) => b.urgency - a.urgency);
+
+    // Лог для отладки, чтобы вы видели, справляется ли система
+    // Если urgency часто выше 5000-10000 мс, значит лимита запросов не хватает
+    if (candidates.length > 0 && this.messageCount % 100 === 0) {
+       console.log(`[OI Poller] Queue size: ${candidates.length}, Max Delay: ${(candidates[0].urgency/1000).toFixed(1)}s`);
+    }
+
+    // Берем пачку, которая влезает в лимит
+    return candidates
+      .slice(0, MAX_REQ_PER_SEC)
+      .map(c => c.symbol);
   }
 
   private async fetchOI(symbol: string): Promise<void> {
@@ -396,8 +479,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
           const prevOI = state.openInterest || val;
           state.openInterest = val;
 
-          // Поднят порог до 0.5% (было 0.1%), чтобы снизить шум
-          if (Math.abs(val - prevOI) / prevOI > 0.005 && state.lastCandleTimestamp > 0) {
+          if (Math.abs(val - prevOI) / prevOI > 0.001 && state.lastCandleTimestamp > 0) {
             const currentCandleTS = Math.floor(Date.now() / 60000) * 60000;
             this.emitUpdate(state, {
               price: state.lastPrice,

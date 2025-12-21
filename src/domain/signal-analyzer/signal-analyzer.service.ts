@@ -55,7 +55,7 @@ export class SignalAnalyzerService {
         this.featureEngine = new FeatureEngine(config);
         this.decisionAggregator = new DecisionAggregator(config.weights, config.decision.threshold);
         this.entryCalculator = new EntryCalculator(config);
-        this.regimeSupervisor = new RegimeSupervisor(config.weights);
+        this.regimeSupervisor = new RegimeSupervisor(config);
 
         this.logger.info(`✅ SignalAnalyzerService started with ${this.modules.length} modules.`);
     }

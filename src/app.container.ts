@@ -4,6 +4,7 @@ import { SignalRepository } from './infrastructure/repositories/signal.repositor
 import { TriggerRepository } from './infrastructure/repositories/trigger.repository';
 import { MarketDataRepository } from './infrastructure/repositories/market-data.repository';
 import { AnalizationResultRepository } from '@infrastructure/repositories/analization-result.repository';
+import { TradeRepository } from './infrastructure/repositories/trade.repository';
 
 // Services
 import { UptimeService } from './infrastructure/services/uptime.service';
@@ -14,6 +15,7 @@ import { SignalScannerService } from './infrastructure/services/signal-scanner.s
 import { SignalVerifierService } from './infrastructure/services/signal-verifier.service';
 import { MarketDataGatewayService } from './infrastructure/market-data/market-data-gateway.service';
 import { BinanceMarketDataProvider } from './infrastructure/market-data/providers/binance.provider';
+import { BinanceTradeService } from './infrastructure/services/binance-trade.service';
 // Signal Analyzer (isolated module)
 import { OrderflowModule, MomentumModule, MeanReversionModule, OIModule, SignalAnalyzerService } from './domain/signal-analyzer';
 import { GlobalTrendService } from './domain/signal-analyzer/services/global-trend.service'; // Обновленный путь
@@ -43,6 +45,7 @@ export function registerDependencies(): void {
   container.bind('ISignalRepository', () => new SignalRepository());
   container.bind('IMarketDataRepository', () => new MarketDataRepository());
   container.bind('IAnalizationResultRepository', () => new AnalizationResultRepository());
+  container.bind('ITradeRepository', () => new TradeRepository());
 
   // --- 2. Market Data Infrastructure ---
   const gateway = new MarketDataGatewayService(container.get('IMarketDataRepository'));
@@ -55,11 +58,19 @@ export function registerDependencies(): void {
   // --- 3. Domain Services (Logic) ---
   container.bind(UptimeService, () => new UptimeService());
   container.bind('ITechnicalAnalysisService', () => new TechnicalAnalysisService());
+  container.bind('ITradeService', () => new BinanceTradeService(
+    container.get('ITradeRepository'),
+  ));
 
   // --- 4. Presentation / Notification ---
   container.bind(TelegramBotService, () => new TelegramBotService(process.env.TELEGRAM_BOT_TOKEN || ''));
   container.bind(SignalHandler, () => new SignalHandler(container.get(TelegramBotService), container.get('ISignalRepository')));
-  container.bind('INotificationService', () => new NotificationService(container.get(SignalHandler), container.get('ISignalRepository')));
+  container.bind('INotificationService', () => new NotificationService(
+    container.get(SignalHandler),
+    container.get('ISignalRepository'),
+    container.get('IMarketDataRepository'),
+    container.get('ITradeService'),
+  ));
 
   // --- 5. Engine (Orchestrator) ---
   const engine = new TriggerEngineService(

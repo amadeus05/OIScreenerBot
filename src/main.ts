@@ -8,6 +8,7 @@ import { DIContainer } from './shared/container';
 import { DatabaseModule } from './infrastructure/database/database.module';
 import { Logger } from './shared/logger';
 import { registerDependencies } from './app.container';
+import { registerTradeRoutes } from './presentation/http/trade.routes';
 
 // Load environment variables
 config();
@@ -21,6 +22,7 @@ import './presentation/telegram/handlers/signal.handler';
 import { PumpScoutBot } from './app';
 
 const server = express();
+server.use(express.json());
 const PORT: number = Number(process.env.PORT) || 8000; // Render требует переменную PORT
 
 // Здоровье бота
@@ -30,10 +32,6 @@ server.get('/health', (_req: Request, res: Response) => {
 
 server.get('/', (_req: Request, res: Response) => {
   res.send('<h1>Я на связи!</h1><p>/health — <- проверить пульс <3 </p>');
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Fake Express server listening on port ${PORT}`);
 });
 
 const logger = new Logger('Main');
@@ -55,8 +53,15 @@ async function bootstrap(): Promise<void> {
     // Register all dependencies
     registerDependencies();
 
+    // Register HTTP routes that depend on DI
+    registerTradeRoutes(server, DIContainer.getInstance());
+
     // Initialize database
     await DatabaseModule.initialize();
+
+    server.listen(PORT, '0.0.0.0', () => {
+      logger.info(`Express server listening on port ${PORT}`);
+    });
 
     // Start the application
     const app: PumpScoutBot = DIContainer.getInstance().get<PumpScoutBot>(PumpScoutBot);

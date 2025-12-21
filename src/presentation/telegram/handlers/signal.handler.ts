@@ -20,7 +20,7 @@ export class SignalHandler {
     triggerId: number,
     userId: number,
     triggerIntervalMinutes?: number,
-  ): Promise<void> {
+  ): Promise<Signal> {
     try {
       const signalCount = await this.signalRepository.getLast24HoursSignalCountByTriggerAndSymbol(
         triggerId,
@@ -42,7 +42,7 @@ export class SignalHandler {
       signal.priceChangePercent = signalDto.priceChangePercent ?? null;
       signal.currentPrice = signalDto.currentPrice ?? null;
 
-      await this.signalRepository.save(signal);
+      const saved = await this.signalRepository.save(signal);
 
       // send telegram message
       await this.telegramBotService.sendSignal(
@@ -56,8 +56,10 @@ export class SignalHandler {
       );
 
       this.logger.info(`Signal sent for ${signalDto.symbol} (trigger #${triggerId})`);
+      return saved;
     } catch (error) {
       this.logger.error('Error handling signal:', error);
+      throw error;
     }
   }
 }

@@ -134,6 +134,8 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
   private errorCount = 0;
   private reconnectAttempts = 0;
   private lastUpdateTime = 0;
+  private rateLimitUntil = 0;
+  private rateLimitHits = 0;
 
   constructor(marketType: MarketType = 'futures') {
     this.marketType = marketType;
@@ -420,6 +422,11 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
   private async startSmartOIPolling() {
     this.isPollingOI = true;
     while (this.isPollingOI && this.connected) {
+      const now = Date.now();
+      if (now < this.rateLimitUntil) {
+        await new Promise((r) => setTimeout(r, this.rateLimitUntil - now));
+        continue;
+      }
       const start = Date.now();
       const candidates = this.selectOICandidates();
       if (candidates.length > 0) await Promise.all(candidates.map((sym) => this.fetchOI(sym)));
@@ -504,7 +511,22 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
         const p = this.priorityMap.get(symbol);
         if (p) p.lastUpdated = Date.now();
       }
-    } catch { }
+      this.rateLimitHits = 0;
+    } catch (err: any) {
+      if (axios.isAxiosError(err) && err.response?.status === 429) {
+        const retryAfterHeader = err.response.headers?.['retry-after'];
+        const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : 0;
+        const backoffMs = Math.min(
+          retryAfterMs || 2000 * Math.pow(2, Math.min(this.rateLimitHits, 5)),
+          30000
+        );
+        this.rateLimitHits = Math.min(this.rateLimitHits + 1, 6);
+        this.rateLimitUntil = Date.now() + backoffMs;
+        const p = this.priorityMap.get(symbol);
+        if (p) p.lastUpdated = Date.now();
+        this.logger.warn(`Binance OI rate limited, backoff ${backoffMs}ms`);
+      }
+    }
   }
 
   public async subscribe(symbols: string[]): Promise<void> { }

@@ -17,6 +17,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.86.2",
     "axios": "^1.13.2",
+    "binance-api-node": "^0.13.6",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "csv-writer": "^1.6.0",

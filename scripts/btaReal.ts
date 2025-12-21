@@ -318,6 +318,10 @@ async function runRealBacktest() {
                     const riskUsd = balance * (POS_CFG.baseRiskPct / 100);
                     const distToSl = Math.abs(res.entryPrice - res.sl);
                     const slPct = distToSl / res.entryPrice;
+
+                    // Пропускаем сигнал, если расстояние до SL некорректно (деление на 0/NaN)
+                    if (slPct <= 0 || !Number.isFinite(slPct)) continue;
+
                     positionSizeUsd = Math.min(riskUsd / slPct, balance * POS_CFG.leverage);
                     quantity = positionSizeUsd / res.entryPrice;
                 }
@@ -398,8 +402,8 @@ async function runRealBacktest() {
                     symbol: res.symbol,
                     action: res.action,
                     entryPrice: entryPriceReal,
-                    sl: res.sl,
-                    tp: res.tp,
+                    sl: adjustedSl,   // используем фактический SL после пересчёта
+                    tp: adjustedTp,   // используем фактический TP после пересчёта
                     bars: chartBars,
                     timestamp: ts
                 }, 'backtest-charts');

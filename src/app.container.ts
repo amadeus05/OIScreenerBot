@@ -60,6 +60,7 @@ export function registerDependencies(): void {
   container.bind('ITechnicalAnalysisService', () => new TechnicalAnalysisService());
   container.bind('ITradeService', () => new BinanceTradeService(
     container.get('ITradeRepository'),
+    container.get('IMarketDataRepository'),
   ));
 
   // --- 4. Presentation / Notification ---
@@ -68,8 +69,6 @@ export function registerDependencies(): void {
   container.bind('INotificationService', () => new NotificationService(
     container.get(SignalHandler),
     container.get('ISignalRepository'),
-    container.get('IMarketDataRepository'),
-    container.get('ITradeService'),
   ));
 
   // --- 5. Engine (Orchestrator) ---

@@ -12,6 +12,7 @@ import {
   TradeSide,
   TradeStatus,
   TradeType,
+  TradeSnapshot,
 } from '../types/trade.types';
 
 @Entity('trades')
@@ -89,6 +90,9 @@ export class Trade {
 
   @Column({ type: 'simple-json', nullable: true })
   errorPayload?: Record<string, unknown> | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  snapshot: TradeSnapshot | null = null;
 
   @Column({ type: 'datetime', nullable: true })
   closedAt: Date | null = null;

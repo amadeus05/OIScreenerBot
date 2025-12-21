@@ -5,6 +5,7 @@ import {
   TradeSide,
   TradeStatus,
   TradeType,
+  TradeSnapshot,
 } from '../types/trade.types';
 
 export interface PlaceOrderRequest {
@@ -47,6 +48,7 @@ export interface ITradeRepository {
     tags?: string[] | null;
     requestPayload?: Record<string, unknown> | null;
     clientOrderId?: string | null;
+    snapshot?: TradeSnapshot | null;
     status?: TradeStatus;
   }): Promise<Trade>;
   updateTrade(id: number, patch: Partial<Trade>): Promise<Trade>;

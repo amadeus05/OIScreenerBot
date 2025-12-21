@@ -1,3 +1,5 @@
+import { SmartCandle } from '../interfaces/market-data.interface';
+
 export type TradeSide = 'BUY' | 'SELL';
 
 export type TradeType =
@@ -21,4 +23,11 @@ export type TradeStatus =
   | 'CLOSED';
 
 export type PositionSide = 'LONG' | 'SHORT';
+
+export type TradeSnapshot = {
+  takenAt: number;
+  price: number;
+  lastCandle?: SmartCandle;
+  recentCandles?: SmartCandle[];
+};
 

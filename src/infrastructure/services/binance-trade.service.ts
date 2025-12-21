@@ -8,7 +8,8 @@ import {
   PlaceOrderRequest,
 } from '../../domain/interfaces/trade.interface';
 import { Trade } from '../../domain/entities/trade.entity';
-import { TradeStatus, TradeSide } from '../../domain/types/trade.types';
+import { IMarketDataRepository } from '../../domain/interfaces/services.interface';
+import { TradeSnapshot, TradeStatus, TradeSide } from '../../domain/types/trade.types';
 
 const DEFAULT_HTTP_BASE =
   process.env.BINANCE_TESTNET_HTTP_BASE || 'https://testnet.binancefuture.com';
@@ -23,6 +24,8 @@ export class BinanceTradeService implements ITradeService {
 
   constructor(
     @Inject('ITradeRepository') private readonly tradeRepo: ITradeRepository,
+    @Inject('IMarketDataRepository')
+    private readonly marketDataRepo: IMarketDataRepository,
   ) {
     const apiKey = process.env.BINANCE_TESTNET_API_KEY;
     const apiSecret = process.env.BINANCE_TESTNET_SECRET_KEY;
@@ -73,6 +76,8 @@ export class BinanceTradeService implements ITradeService {
       ...(positionSide ? { positionSide } : {}),
     };
 
+    const snapshot = this.buildSnapshot(symbol);
+
     const trade = await this.tradeRepo.createTrade({
       symbol,
       side,
@@ -89,6 +94,7 @@ export class BinanceTradeService implements ITradeService {
       tags: tags ?? null,
       requestPayload: orderPayload,
       clientOrderId: clientOrderId ?? null,
+      snapshot: snapshot ?? null,
       status: 'NEW',
     });
 
@@ -285,6 +291,33 @@ export class BinanceTradeService implements ITradeService {
         }),
       ),
     );
+  }
+
+  private buildSnapshot(symbol: string): TradeSnapshot | null {
+    try {
+      const recentCandles =
+        this.marketDataRepo.getHistory(symbol, 120)?.slice(-60) || [];
+      const lastCandle =
+        recentCandles.length > 0 ? recentCandles[recentCandles.length - 1] : undefined;
+      const price =
+        this.marketDataRepo.getCurrentPrice(symbol) ||
+        lastCandle?.ohlc.c ||
+        0;
+
+      return {
+        takenAt: Date.now(),
+        price,
+        lastCandle,
+        recentCandles,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Failed to build trade snapshot for ${symbol}: ${
+          (error as Error).message
+        }`,
+      );
+      return null;
+    }
   }
 
   private ensureCredentials(): void {

@@ -83,6 +83,7 @@ function mergeConfig(base: SignalAnalyzerConfig, override?: Partial<SignalAnalyz
         ...override,
         lookbacks: { ...base.lookbacks, ...override.lookbacks },
         weights: { ...base.weights, ...override.weights },
+        regimeWeights: { ...base.regimeWeights, ...override.regimeWeights },
         decision: { ...base.decision, ...override.decision },
         position: { ...base.position, ...override.position },
         levels: { ...base.levels, ...override.levels },

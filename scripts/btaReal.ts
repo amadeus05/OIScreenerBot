@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DatabaseModule, AppDataSource } from '../src/infrastructure/database/database.module';
 import { HistoryCandle } from '../src/domain/entities/history-candle.entity';
-import { SignalAnalyzerService, BarData, TradeAction, SignalResult } from '../src/domain/signal-analyzer';
+import { SignalAnalyzerService, BarData, TradeAction, SignalResult, ModuleName } from '../src/domain/signal-analyzer';
 import { MeanReversionModule, OrderflowModule, MomentumModule } from '../src/domain/signal-analyzer/modules';
 import { TradeGatekeeper } from '../src/domain/signal-analyzer/gatekeeper/trade-gatekeeper';
 import { TrendAlignmentGate } from '../src/domain/signal-analyzer/gatekeeper/gates/trend-alignment.gate';
@@ -108,6 +108,8 @@ interface ActivePosition {
     sl: number;
     openTime: number;
     lastFundingTime: number;
+    reasonTags?: string[];
+    modules?: Record<ModuleName, number>;
 }
 
 interface MarketSnapshot {
@@ -243,7 +245,13 @@ async function runRealBacktest() {
             if (currentMargin <= maintenanceMargin) {
                 const liquidationLoss = pos.margin + (positionValue * LIQUIDATION_FEE);
                 balance -= liquidationLoss;
-                tradeHistory.push({ symbol: pos.symbol, pnl: -liquidationLoss, reason: 'LIQUIDATION' });
+                tradeHistory.push({
+                    symbol: pos.symbol,
+                    pnl: -liquidationLoss,
+                    reason: 'LIQUIDATION',
+                    reasonTags: pos.reasonTags,
+                    modules: pos.modules,
+                });
                 console.log(`💀 LIQUIDATED [${pos.symbol}] @ ${worstPrice}. Lost: -$${liquidationLoss.toFixed(2)} (Margin: $${pos.margin.toFixed(2)} + Fee: $${(positionValue * LIQUIDATION_FEE).toFixed(2)}). Bal: $${balance.toFixed(2)}`);
                 activePositions.splice(i, 1);
                 continue;
@@ -269,8 +277,14 @@ async function runRealBacktest() {
                 const netPnl = grossPnl - exitFee;
                 balance += (pos.margin + netPnl);
 
-                activePositions.splice(i, 1);
-                tradeHistory.push({ symbol: pos.symbol, pnl: netPnl, reason });
+                    activePositions.splice(i, 1);
+                    tradeHistory.push({
+                        symbol: pos.symbol,
+                        pnl: netPnl,
+                        reason,
+                        reasonTags: pos.reasonTags,
+                        modules: pos.modules,
+                    });
 
                 const emoji = netPnl > 0 ? '✅' : '❌';
                 console.log(`${emoji} CLOSED [${pos.symbol}] ${reason}. PnL: $${netPnl.toFixed(2)}. Bal: $${balance.toFixed(2)}`);
@@ -388,10 +402,18 @@ async function runRealBacktest() {
                     tp: adjustedTp,  // 🔥 Пересчитанный TP
                     sl: adjustedSl,  // 🔥 Пересчитанный SL
                     openTime: ts,
-                    lastFundingTime: ts
+                    lastFundingTime: ts,
+                    reasonTags: res.reasonTags,
+                    modules: res.modules,
                 });
 
-                console.log(`⚡ OPEN [${res.symbol}] ${res.action} (${res.entryType}) @ ${entryPriceReal.toFixed(4)}. Size: $${positionSizeUsd.toFixed(0)}`);
+                const tagList = (res.reasonTags || []).join(',');
+                const modulesStr = res.modules ? Object.entries(res.modules).map(([k, v]) => `${k}:${v.toFixed(2)}`).join(' | ') : '';
+                console.log(
+                    `⚡ OPEN [${res.symbol}] ${res.action} (${res.entryType}) @ ${entryPriceReal.toFixed(4)}. Size: $${positionSizeUsd.toFixed(0)}`
+                    + (tagList ? ` | tags: ${tagList}` : '')
+                    + (modulesStr ? ` | modules: ${modulesStr}` : '')
+                );
 
                 // 📊 Generate HTML chart for this trade
                 const allBarsForChart = marketData.get(res.symbol)!;

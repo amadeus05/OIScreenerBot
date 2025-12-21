@@ -3,7 +3,7 @@
 // ========================================================================
 
 import { Features, ModuleName } from '../types';
-import { ModuleWeights, DEFAULT_CONFIG } from '../types/config';
+import { ModuleWeights, DEFAULT_CONFIG, SignalAnalyzerConfig, MarketRegimeKey } from '../types/config';
 import { RegimeScenarios, RegimeScenario } from '../rules/scenarios/regime.scenarios';
 
 export type MarketRegime = 'RANGING' | 'TRENDING' | 'VOLATILE' | 'EXTREME';
@@ -23,11 +23,13 @@ interface ScoredScenario {
 
 export class RegimeSupervisor {
     private readonly baseWeights: ModuleWeights;
+    private readonly regimeOverrides: Partial<Record<MarketRegimeKey, ModuleWeights>>;
     // Максимальный приоритет для нормализации скора
     private readonly MAX_PRIORITY = 100; 
 
-    constructor(baseWeights: ModuleWeights = DEFAULT_CONFIG.weights) {
-        this.baseWeights = baseWeights;
+    constructor(config: SignalAnalyzerConfig = DEFAULT_CONFIG) {
+        this.baseWeights = config.weights;
+        this.regimeOverrides = config.regimeWeights || {};
     }
 
     public analyze(features: Features, currentPrice: number): RegimeAnalysis {
@@ -79,9 +81,11 @@ export class RegimeSupervisor {
         // 4. Weight Blending (Lerp)
         // adjusted = base * (1 - conf) + target * conf
         // Чем выше уверенность, тем сильнее мы смещаем веса в сторону сценария
+        const targetWeights = this.regimeOverrides[winner.scenario.regime] || winner.scenario.weights;
+
         const adjustedWeights = this.blendWeights(
             this.baseWeights,
-            winner.scenario.weights,
+            targetWeights,
             confidence
         );
 
@@ -104,13 +108,13 @@ export class RegimeSupervisor {
 
         // 🔥 ИЗМЕНЕНИЕ: Жестко отключаем Momentum и OI во флэте
         // Во флэте работают только MeanReversion (отскоки) и Levels (уровни)
-        const rangingWeights: ModuleWeights = { 
-            meanReversion: 0.85, // Основной упор на возврат к среднему
-            orderflow: 0.15,     // Немного потока для подтверждения
+        const rangingWeights: ModuleWeights = this.regimeOverrides.RANGING || { 
+            meanReversion: 0.85,
+            orderflow: 0.15,
             liquidations: 0.0,
             levels: 0.0,         
-            momentum: 0.00,      // ⛔ ОТКЛЮЧЕНО (было 0.05) - убирает ложные пробои
-            oi: 0.00,            // ⛔ ОТКЛЮЧЕНО (было 0.05)
+            momentum: 0.00,
+            oi: 0.00,
         };
 
         return {

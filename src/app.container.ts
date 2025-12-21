@@ -126,13 +126,14 @@ export function registerDependencies(): void {
     container.get('IMarketDataRepository'),
   ));
 
-  // --- 7.5. Signal Scanner (auto signal detection) ---
+  // --- 7.5. Signal Scanner (auto signal detection + auto-trading) ---
   container.bind(SignalScannerService, () => new SignalScannerService(
     container.get(SignalAnalyzerService),
     container.get(TelegramBotService),
     container.get('IAnalizationResultRepository'),
-    container.get('IMarketDataRepository'), // <--- UPDATED: Pass memory repository
-    container.get(GlobalTrendService)
+    container.get('IMarketDataRepository'),
+    container.get(GlobalTrendService),
+    container.get('ITradeService'), // <--- NEW: Pass trade service for auto-trading
   ));
 
   container.bind(SignalVerifierService, () => new SignalVerifierService(

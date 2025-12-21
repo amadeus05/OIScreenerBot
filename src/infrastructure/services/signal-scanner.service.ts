@@ -7,9 +7,18 @@ import { IAnalizationResultRepository } from '../../domain/interfaces/repositori
 import { AnalizationResult } from '../../domain/entities/analization-result.entity';
 import { Inject } from '../../shared/decorators';
 import { IMarketDataRepository } from '../../domain/interfaces/services.interface';
+import { ITradeService, PlaceOrderRequest } from '../../domain/interfaces/trade.interface';
 
 import { GlobalTrendService } from '../../domain/signal-analyzer/services/global-trend.service';
 import { MarketContext } from '../../domain/signal-analyzer/types/context';
+
+export interface AutoTradeConfig {
+    enabled: boolean;
+    defaultQuantityUSDT: number;
+    defaultLeverage: number;
+    minConfidence: number;
+    maxOpenTrades: number;
+}
 
 export interface SignalScannerConfig {
     intervalMs: number;
@@ -19,7 +28,9 @@ export interface SignalScannerConfig {
     alertChatId: string;
 
     min24hVolumeUSD: number;
-    blacklistedSymbols: string[]
+    blacklistedSymbols: string[];
+
+    autoTrade: AutoTradeConfig;
 }
 
 const DEFAULT_CONFIG: SignalScannerConfig = {
@@ -36,7 +47,16 @@ const DEFAULT_CONFIG: SignalScannerConfig = {
     blacklistedSymbols: [
         'USDCUSDT', 'USDPUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'BUSDUSDT', 'DAIUSDT', 'EURUSDT',
         'BTCDOMUSDT', 'BLUEBIRDUSDT', '1000LUNCUSDT', 'USTCUSDT' 
-    ]
+    ],
+
+    // Автоматический трейдинг на Binance Testnet
+    autoTrade: {
+        enabled: process.env.AUTO_TRADE_ENABLED === 'true',
+        defaultQuantityUSDT: Number(process.env.AUTO_TRADE_QUANTITY_USDT) || 100,
+        defaultLeverage: Number(process.env.AUTO_TRADE_LEVERAGE) || 5,
+        minConfidence: Number(process.env.AUTO_TRADE_MIN_CONFIDENCE) || 0.7,
+        maxOpenTrades: Number(process.env.AUTO_TRADE_MAX_OPEN) || 3,
+    }
 };
 
 export class SignalScannerService {
@@ -45,10 +65,12 @@ export class SignalScannerService {
     private readonly signalAnalyzer: SignalAnalyzerService;
     private readonly telegramBot: TelegramBotService;
     private readonly analizationResultRepository: IAnalizationResultRepository;
+    private readonly tradeService: ITradeService | null;
 
     private scanTimer: NodeJS.Timeout | null = null;
     private isRunning = false;
     private lastScanTime = 0;
+    private openTradesCount = 0;
     
     private allSymbols: string[] = [];
 
@@ -58,13 +80,19 @@ export class SignalScannerService {
         analizationResultRepository: IAnalizationResultRepository,
         @Inject('IMarketDataRepository') private readonly marketDataRepository: IMarketDataRepository,
         private readonly globalTrendService: GlobalTrendService,
+        @Inject('ITradeService') tradeService: ITradeService | null,
         config: Partial<SignalScannerConfig> = {},
     ) {
         this.config = { ...DEFAULT_CONFIG, ...config };
         this.signalAnalyzer = signalAnalyzer;
         this.telegramBot = telegramBot;
         this.analizationResultRepository = analizationResultRepository;
+        this.tradeService = tradeService;
         this.ensureLogDir();
+
+        if (this.config.autoTrade.enabled) {
+            this.logger.info(`🤖 Auto-trading ENABLED: ${this.config.autoTrade.defaultQuantityUSDT} USDT, ${this.config.autoTrade.defaultLeverage}x leverage`);
+        }
     }
 
     start(): void {
@@ -132,6 +160,9 @@ export class SignalScannerService {
                             this.logResult(result);
                             await this.sendNotification(result);
                             await this.saveToDatabase(result);
+                            
+                            // 🤖 Автоматическое создание трейда
+                            await this.executeAutoTrade(result);
                         }
                     }
                 } catch (err) {
@@ -285,6 +316,107 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
     private ensureLogDir(): void {
         if (!fs.existsSync(this.config.logDir)) {
             fs.mkdirSync(this.config.logDir, { recursive: true });
+        }
+    }
+
+    // ==================== AUTO-TRADING ====================
+
+    private async executeAutoTrade(signal: SignalResult): Promise<void> {
+        const { autoTrade } = this.config;
+
+        // 1. Проверяем, включен ли автотрейдинг
+        if (!autoTrade.enabled) return;
+
+        // 2. Проверяем наличие трейд-сервиса
+        if (!this.tradeService) {
+            this.logger.warn('⚠️ Auto-trade enabled but ITradeService not available');
+            return;
+        }
+
+        // 3. Проверяем минимальную уверенность сигнала
+        if (signal.confidence < autoTrade.minConfidence) {
+            this.logger.debug(`Skip trade: confidence ${signal.confidence.toFixed(2)} < ${autoTrade.minConfidence}`);
+            return;
+        }
+
+        // 4. Проверяем лимит открытых позиций
+        if (this.openTradesCount >= autoTrade.maxOpenTrades) {
+            this.logger.warn(`⚠️ Max open trades reached (${autoTrade.maxOpenTrades}), skipping ${signal.symbol}`);
+            return;
+        }
+
+        // 5. Рассчитываем quantity на основе USDT
+        const quantity = this.calculateQuantity(signal.entryPrice, autoTrade.defaultQuantityUSDT);
+        if (quantity <= 0) {
+            this.logger.warn(`⚠️ Cannot calculate quantity for ${signal.symbol}`);
+            return;
+        }
+
+        // 6. Формируем запрос на ордер
+        const orderRequest: PlaceOrderRequest = {
+            symbol: signal.symbol,
+            side: signal.action === 'LONG' ? 'BUY' : 'SELL',
+            type: 'MARKET',
+            quantity,
+            stopLoss: signal.sl,
+            takeProfit: signal.tp[0], // Первый TP
+            leverage: autoTrade.defaultLeverage,
+            source: 'signal-scanner',
+            tags: signal.reasonTags.slice(0, 5),
+        };
+
+        try {
+            this.logger.info(`🚀 Placing ${signal.action} order for ${signal.symbol}: qty=${quantity}, SL=${signal.sl}, TP=${signal.tp[0]}`);
+            
+            const trade = await this.tradeService.placeOrder(orderRequest);
+            this.openTradesCount++;
+            
+            this.logger.info(`✅ Trade placed: ${signal.symbol} #${trade.id} (${trade.status})`);
+            
+            // Отправляем уведомление об открытии трейда
+            await this.sendTradeNotification(signal, trade);
+        } catch (error) {
+            this.logger.error(`❌ Failed to place trade for ${signal.symbol}:`, error);
+        }
+    }
+
+    private calculateQuantity(price: number, usdtAmount: number): number {
+        if (price <= 0) return 0;
+        
+        // Расчёт: сколько монет можно купить на указанную сумму USDT
+        const rawQty = usdtAmount / price;
+        
+        // Округляем до разумной точности (зависит от монеты)
+        // Для большинства монет достаточно 3 знаков после запятой
+        if (price > 1000) {
+            return Math.floor(rawQty * 1000) / 1000; // BTC, ETH
+        } else if (price > 1) {
+            return Math.floor(rawQty * 100) / 100; // Большинство альткоинов
+        } else {
+            return Math.floor(rawQty); // Дешёвые монеты
+        }
+    }
+
+    private async sendTradeNotification(signal: SignalResult, trade: { id: number; status: string }): Promise<void> {
+        const chatId = this.config.alertChatId;
+        if (!chatId) return;
+
+        const emoji = signal.action === 'LONG' ? '🟢' : '🔴';
+        const message = `
+${emoji} <b>TRADE OPENED: ${signal.symbol}</b> ${emoji}
+🆔 <b>Trade ID:</b> #${trade.id}
+📊 <b>Status:</b> ${trade.status}
+📍 <b>Entry:</b> $${signal.entryPrice.toFixed(4)}
+🛑 <b>SL:</b> $${signal.sl.toFixed(4)}
+🎯 <b>TP:</b> $${signal.tp[0]?.toFixed(4) || '-'}
+⚡ <b>Leverage:</b> ${this.config.autoTrade.defaultLeverage}x
+💰 <b>Size:</b> $${this.config.autoTrade.defaultQuantityUSDT}
+<i>Auto-Trade Bot</i>`.trim();
+
+        try {
+            await this.telegramBot.sendMessage(parseInt(chatId), message);
+        } catch (error) {
+            this.logger.error(`Error sending trade notification:`, error);
         }
     }
 }

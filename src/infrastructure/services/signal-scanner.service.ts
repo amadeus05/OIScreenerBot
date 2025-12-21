@@ -7,7 +7,7 @@ import { IAnalizationResultRepository } from '../../domain/interfaces/repositori
 import { AnalizationResult } from '../../domain/entities/analization-result.entity';
 import { Inject } from '../../shared/decorators';
 import { IMarketDataRepository } from '../../domain/interfaces/services.interface';
-import { ITradeService, PlaceOrderRequest } from '../../domain/interfaces/trade.interface';
+import { ITradeRepository, ITradeService, PlaceOrderRequest } from '../../domain/interfaces/trade.interface';
 
 import { GlobalTrendService } from '../../domain/signal-analyzer/services/global-trend.service';
 import { MarketContext } from '../../domain/signal-analyzer/types/context';
@@ -18,6 +18,7 @@ export interface AutoTradeConfig {
     defaultLeverage: number;
     minConfidence: number;
     maxOpenTrades: number;
+    cooldownMs: number;
 }
 
 export interface SignalScannerConfig {
@@ -56,6 +57,7 @@ const DEFAULT_CONFIG: SignalScannerConfig = {
         defaultLeverage: Number(process.env.AUTO_TRADE_LEVERAGE) || 5,
         minConfidence: Number(process.env.AUTO_TRADE_MIN_CONFIDENCE) || 0.7,
         maxOpenTrades: Number(process.env.AUTO_TRADE_MAX_OPEN) || 3,
+        cooldownMs: Number(process.env.AUTO_TRADE_COOLDOWN_MS) || 3 * 60 * 1000, // 3 минуты
     }
 };
 
@@ -66,11 +68,13 @@ export class SignalScannerService {
     private readonly telegramBot: TelegramBotService;
     private readonly analizationResultRepository: IAnalizationResultRepository;
     private readonly tradeService: ITradeService | null;
+    private readonly tradeRepository: ITradeRepository | null;
+    private readonly hasTestnetKeys: boolean;
 
     private scanTimer: NodeJS.Timeout | null = null;
     private isRunning = false;
     private lastScanTime = 0;
-    private openTradesCount = 0;
+    private lastTradeTimestamps: Map<string, number> = new Map();
     
     private allSymbols: string[] = [];
 
@@ -81,6 +85,7 @@ export class SignalScannerService {
         @Inject('IMarketDataRepository') private readonly marketDataRepository: IMarketDataRepository,
         private readonly globalTrendService: GlobalTrendService,
         @Inject('ITradeService') tradeService: ITradeService | null,
+        @Inject('ITradeRepository') tradeRepository: ITradeRepository | null,
         config: Partial<SignalScannerConfig> = {},
     ) {
         this.config = { ...DEFAULT_CONFIG, ...config };
@@ -88,10 +93,15 @@ export class SignalScannerService {
         this.telegramBot = telegramBot;
         this.analizationResultRepository = analizationResultRepository;
         this.tradeService = tradeService;
+        this.tradeRepository = tradeRepository;
+        this.hasTestnetKeys = Boolean(process.env.BINANCE_TESTNET_API_KEY && process.env.BINANCE_TESTNET_SECRET_KEY);
         this.ensureLogDir();
 
         if (this.config.autoTrade.enabled) {
             this.logger.info(`🤖 Auto-trading ENABLED: ${this.config.autoTrade.defaultQuantityUSDT} USDT, ${this.config.autoTrade.defaultLeverage}x leverage`);
+            if (!this.hasTestnetKeys) {
+                this.logger.warn('⚠️ Auto-trade enabled, но BINANCE_TESTNET_API_KEY/SECRET не заданы. Ордеры не будут выполнены.');
+            }
         }
     }
 
@@ -327,9 +337,29 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
         // 1. Проверяем, включен ли автотрейдинг
         if (!autoTrade.enabled) return;
 
+        // 1.1. Проверка наличия ключей
+        if (!this.hasTestnetKeys) {
+            this.logger.warn('⚠️ Testnet ключи не заданы, пропускаем автотрейд.');
+            return;
+        }
+
         // 2. Проверяем наличие трейд-сервиса
         if (!this.tradeService) {
             this.logger.warn('⚠️ Auto-trade enabled but ITradeService not available');
+            return;
+        }
+
+        // 2.1. Проверяем лимит открытых сделок через репозиторий
+        const openCount = await this.getOpenTradesCount();
+        if (openCount >= autoTrade.maxOpenTrades) {
+            this.logger.warn(`⚠️ Max open trades reached (${autoTrade.maxOpenTrades}), skipping ${signal.symbol}`);
+            return;
+        }
+
+        // 2.2. Анти-спам по символу (cooldown)
+        const lastTs = this.lastTradeTimestamps.get(signal.symbol) || 0;
+        if (Date.now() - lastTs < autoTrade.cooldownMs) {
+            this.logger.debug(`Skip trade: cooldown active for ${signal.symbol}`);
             return;
         }
 
@@ -339,14 +369,8 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
             return;
         }
 
-        // 4. Проверяем лимит открытых позиций
-        if (this.openTradesCount >= autoTrade.maxOpenTrades) {
-            this.logger.warn(`⚠️ Max open trades reached (${autoTrade.maxOpenTrades}), skipping ${signal.symbol}`);
-            return;
-        }
-
         // 5. Рассчитываем quantity на основе USDT
-        const quantity = this.calculateQuantity(signal.entryPrice, autoTrade.defaultQuantityUSDT);
+        const quantity = this.calculateQuantity(signal.entryPrice, autoTrade.defaultQuantityUSDT, autoTrade.defaultLeverage);
         if (quantity <= 0) {
             this.logger.warn(`⚠️ Cannot calculate quantity for ${signal.symbol}`);
             return;
@@ -369,7 +393,7 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
             this.logger.info(`🚀 Placing ${signal.action} order for ${signal.symbol}: qty=${quantity}, SL=${signal.sl}, TP=${signal.tp[0]}`);
             
             const trade = await this.tradeService.placeOrder(orderRequest);
-            this.openTradesCount++;
+            this.lastTradeTimestamps.set(signal.symbol, Date.now());
             
             this.logger.info(`✅ Trade placed: ${signal.symbol} #${trade.id} (${trade.status})`);
             
@@ -380,21 +404,25 @@ ${emoji} <b>SIGNAL: ${result.symbol}</b> ${emoji}
         }
     }
 
-    private calculateQuantity(price: number, usdtAmount: number): number {
+    private calculateQuantity(price: number, usdtAmount: number, leverage: number): number {
         if (price <= 0) return 0;
-        
-        // Расчёт: сколько монет можно купить на указанную сумму USDT
-        const rawQty = usdtAmount / price;
-        
-        // Округляем до разумной точности (зависит от монеты)
-        // Для большинства монет достаточно 3 знаков после запятой
+        const notional = usdtAmount * (leverage > 0 ? leverage : 1);
+        const rawQty = notional / price;
+
+        // Минимальная квота — грубая оценка, чтобы не получить 0
+        const minStep = 0.0001;
+
+        // Округляем вниз до разумной точности, но не ниже minStep
+        let qty: number;
         if (price > 1000) {
-            return Math.floor(rawQty * 1000) / 1000; // BTC, ETH
+            qty = Math.floor(rawQty * 1000) / 1000;
         } else if (price > 1) {
-            return Math.floor(rawQty * 100) / 100; // Большинство альткоинов
+            qty = Math.floor(rawQty * 100) / 100;
         } else {
-            return Math.floor(rawQty); // Дешёвые монеты
+            qty = Math.floor(rawQty * 10) / 10;
         }
+
+        return Math.max(qty, minStep);
     }
 
     private async sendTradeNotification(signal: SignalResult, trade: { id: number; status: string }): Promise<void> {
@@ -417,6 +445,17 @@ ${emoji} <b>TRADE OPENED: ${signal.symbol}</b> ${emoji}
             await this.telegramBot.sendMessage(parseInt(chatId), message);
         } catch (error) {
             this.logger.error(`Error sending trade notification:`, error);
+        }
+    }
+
+    private async getOpenTradesCount(): Promise<number> {
+        try {
+            if (!this.tradeRepository) return 0;
+            const open = await this.tradeRepository.findOpenTrades();
+            return open.length;
+        } catch (error) {
+            this.logger.warn('⚠️ Cannot fetch open trades count, fallback to 0', error as Error);
+            return 0;
         }
     }
 }

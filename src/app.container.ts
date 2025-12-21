@@ -134,6 +134,7 @@ export function registerDependencies(): void {
     container.get('IMarketDataRepository'),
     container.get(GlobalTrendService),
     container.get('ITradeService'), // <--- NEW: Pass trade service for auto-trading
+    container.get('ITradeRepository'), // <--- NEW: Repo to check open trades
   ));
 
   container.bind(SignalVerifierService, () => new SignalVerifierService(

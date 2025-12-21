@@ -3,6 +3,11 @@ import { ModuleName } from './types';
 export interface SignalAnalyzerConfig {
     lookbacks: LookbackConfig;
     weights: ModuleWeights;
+    /**
+     * Опциональные профили весов по режимам рынка.
+     * Если заданы, используются RegimeSupervisor вместо весов сценариев.
+     */
+    regimeWeights?: Partial<Record<MarketRegimeKey, ModuleWeights>>;
     decision: DecisionConfig;
     position: PositionConfig;
     levels: LevelsConfig;
@@ -10,6 +15,8 @@ export interface SignalAnalyzerConfig {
     technical: TechnicalConfig;
     fees: FeesConfig; // <--- ДОБАВЛЕНО
 }
+
+export type MarketRegimeKey = 'RANGING' | 'TRENDING' | 'VOLATILE' | 'EXTREME';
 
 export interface LookbackConfig {
     dCVD: number;       // Bars for CVD delta
@@ -91,31 +98,33 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
 
     weights: {
         // Новая комбинация модулей
-        orderflow: 0.45,      // основной источник силы (CVD, OI, flow)
-        meanReversion: 0.30,  // mean reversion (pump/dump exhaustion)
+        orderflow: 0.37,      // основной источник силы (CVD, OI, flow)
+        meanReversion: 0.13,  // mean reversion (pump/dump exhaustion)
         momentum: 0.25,       // momentum continuation
         // Legacy (не используются, но оставляем для типизации)
-        liquidations: 0.00,
-        levels: 0.00,
-        oi: 0.00,
+        liquidations: 0.04,
+        levels: 0.08,
+        oi: 0.05,
     },
+
+    regimeWeights: {},
 
     decision: {
         // Баланс: не слишком строго, но и не слишком мягко
-        threshold: 0.45, // 0.35 — золотая середина
-        noTradeZone: 0.05,
+        threshold: 0.35, // подняли порог, чтобы отсечь средние сетапы
+        noTradeZone: 0.00,
     },
 
     position: {
-        baseRiskPct: 1.0,
-        maxOpenTrades: 3, // Разрешаем больше одновременных сделок
+        baseRiskPct: 1.13,
+        maxOpenTrades: 1, // Разрешаем больше одновременных сделок
         // Разрешаем входить в сделки со средней уверенностью
         minConfidence: 0.70, // Было 0.55
 
         // Новые поля для синхронизации
         defaultPortfolioSize: 100, // База для расчета, если не знаем баланс
         maxPositionSizeUsd: 300,
-        leverage: 3
+        leverage: 4
     },
 
     // ДОБАВЛЯЕМ РЕАЛЬНЫЕ КОМИССИИ BINANCE (VIP 0)

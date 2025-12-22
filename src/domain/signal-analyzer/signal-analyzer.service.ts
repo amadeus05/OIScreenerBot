@@ -202,7 +202,7 @@ export class SignalAnalyzerService {
             }
 
             this.lastSignalTimes.set(symbol, currentTs);
-            this.logger.info(`🚀 SIGNAL [${symbol}]: ${result.action} @ ${result.entryPrice} | Score: ${aggregation.rawScore.toFixed(2)}`);
+            // this.logger.info(`🚀 SIGNAL [${symbol}]: ${result.action} @ ${result.entryPrice} | Score: ${aggregation.rawScore.toFixed(2)}`);
 
             return result;
 

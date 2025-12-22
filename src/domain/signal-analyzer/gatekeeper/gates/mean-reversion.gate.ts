@@ -28,9 +28,9 @@ export class MeanReversionGate extends BaseGate {
         }
 
         // 2. Проверка импульса (Pump Strength)
-        // 🔥 UPDATED: Используем pChange30m (изменение за 30 мин), так как priceReturn - это 1м смена
+        // 🔥 UPDATED: Берем максимальное движение за 30м (точное или любое окно внутри)
         // Если цена не выросла значительно за полчаса, то это не памп, и разворачивать тут нечего.
-        const impulseStrength = Math.abs(features.pChange30m);
+        const impulseStrength = Math.abs(this.getDominantImpulse(features));
 
         // Если движение меньше 2% (или настройки minImpulse), то это шум
         if (impulseStrength < this.minImpulse) {
@@ -70,5 +70,14 @@ export class MeanReversionGate extends BaseGate {
         }
 
         return this.allow();
+    }
+
+    private getDominantImpulse(features: GateContext['features']): number {
+        const base = features.pChange30m ?? 0;
+        const flexible = features.pChangeUpTo30m ?? 0;
+        // Берём max(|flexible|, |base|) со знаком гибкого окна
+        const mag = Math.abs(flexible) >= Math.abs(base) ? Math.abs(flexible) : Math.abs(base);
+        const sign = Math.sign(flexible);
+        return sign * mag;
     }
 }

@@ -10,7 +10,7 @@ export class TrendAlignmentGate extends BaseGate {
     evaluate(ctx: GateContext): GateResult {
         const { signal, features, marketContext } = ctx;
 
-        // 1. Защита от краха/пампа BTC (у вас это уже было, оставляем)
+        // 1. Макро-фильтр (BTC PUMP/CRASH) - оставляем как есть
         if (marketContext) {
             if (signal.action === 'LONG' && marketContext.globalTrend === 'CRASH') {
                 return this.reject('Blocked: BTC CRASH in progress');
@@ -20,26 +20,32 @@ export class TrendAlignmentGate extends BaseGate {
             }
         }
 
-        // Если это разворотная стратегия (Mean Reversion), пропускаем фильтр тренда,
-        // НО только если сигнал очень сильный
-        const isReversal = signal.reasonTags.some(t =>
-            t.includes('mean_reversion') || t.includes('exhaustion')
+        // 2. Определение силы сигнала для контртренда
+        // Разрешаем контртренд ТОЛЬКО если это спец. паттерн разворота ("exhaustion", "pump_pullback")
+        // Обычные дивергенции ("cvd_bearish_div") - НЕДОСТАТОЧНО сильны для входа против EMA 200.
+        const isStrongReversal = signal.reasonTags.some(t =>
+            t.includes('mean_reversion') || 
+            t.includes('exhaustion') || 
+            t.includes('pump_pullback') || 
+            t.includes('dump_rebound')
         );
 
-        if (isReversal) return this.allow();
-
-        // 🔥 ИЗМЕНЕНИЕ: Фильтр по EMA 200 (Trend EMA)
+        // 3. Жесткий фильтр EMA 200
         // features.trendEma - это EMA 200
-        // features.emaFast - это быстрая цена (EMA 8)
+        // features.emaFast - это текущая структура цены (EMA 8)
 
-        // ЗАПРЕЩАЕМ ЛОНГ, если цена ниже EMA 200 (Глобальный даунтренд)
+        // Если мы хотим ЛОНГ, но цена ПОД EMA 200 -> ЗАПРЕТ (кроме сильного разворота)
         if (signal.action === 'LONG' && features.emaFast < features.trendEma) {
-             return this.reject('Against Trend: Price below EMA 200');
+             if (!isStrongReversal) {
+                 return this.reject('No LONG in Downtrend (Price < EMA200)');
+             }
         }
 
-        // ЗАПРЕЩАЕМ ШОРТ, если цена выше EMA 200 (Глобальный аптренд)
+        // Если мы хотим ШОРТ, но цена НАД EMA 200 -> ЗАПРЕТ (кроме сильного разворота)
         if (signal.action === 'SHORT' && features.emaFast > features.trendEma) {
-             return this.reject('Against Trend: Price above EMA 200');
+             if (!isStrongReversal) {
+                 return this.reject('No SHORT in Uptrend (Price > EMA200)');
+             }
         }
 
         return this.allow();

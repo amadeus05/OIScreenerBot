@@ -18,6 +18,8 @@ export class MeanReversionModule extends BaseModule {
     let maxReliability = 0;
     const activeTags = new Set<string>();
 
+    const dominantImpulse = this.getDominantImpulse(features);
+
     const exhaustionContext = {
       currentPrice: currentBar.c,
       marketContext,
@@ -25,11 +27,11 @@ export class MeanReversionModule extends BaseModule {
       isExhausted:
         features.volZ > 2.5 ||
         // PUMP exhaustion (for SHORT)
-        (features.pChange30m >= 0.05 && features.flowImb < 0.15) ||
-        (features.pChange30m >= 0.05 && features.dCVD < 0) ||
+        (dominantImpulse >= 0.05 && features.flowImb < 0.15) ||
+        (dominantImpulse >= 0.05 && features.dCVD < 0) ||
         // DUMP exhaustion (for LONG) - symmetric logic
-        (features.pChange30m <= -0.05 && features.flowImb > -0.15) ||
-        (features.pChange30m <= -0.05 && features.dCVD > 0),
+        (dominantImpulse <= -0.05 && features.flowImb > -0.15) ||
+        (dominantImpulse <= -0.05 && features.dCVD > 0),
     };
 
     for (const scenario of MeanReversionScenarios) {
@@ -42,9 +44,9 @@ export class MeanReversionModule extends BaseModule {
       let score = scenario.baseScore;
 
       if (scenario.useStrengthMultiplier && exhaustionContext.isExhausted) {
-        const pChange30m = features.pChange30m;
-        if (pChange30m && Math.abs(pChange30m) > 0.08) {
-          const excess = Math.abs(pChange30m) - 0.08;
+        const pChange = dominantImpulse;
+        if (pChange && Math.abs(pChange) > 0.08) {
+          const excess = Math.abs(pChange) - 0.08;
           const multiplier = 1 + Math.min(excess * 6, 0.4);
           score *= multiplier;
         }
@@ -63,6 +65,16 @@ export class MeanReversionModule extends BaseModule {
       this.clampScore(maxReliability),
       Array.from(activeTags),
     );
+  }
+
+  private getDominantImpulse(features: Features): number {
+    const { pChange30m = 0, pChangeUpTo30m = 0 } = features;
+    // Берём max(|pChangeUpTo30m|, |pChange30m|) со знаком гибкого окна
+    const mag = Math.abs(pChangeUpTo30m) >= Math.abs(pChange30m)
+      ? Math.abs(pChangeUpTo30m)
+      : Math.abs(pChange30m);
+    const sign = Math.sign(pChangeUpTo30m);
+    return sign * mag;
   }
 
   reset(): void { }

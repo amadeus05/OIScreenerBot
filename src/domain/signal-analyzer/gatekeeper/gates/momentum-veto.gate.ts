@@ -4,10 +4,19 @@ import { GateContext, GateResult } from '../types';
 export class MomentumVetoGate extends BaseGate {
     readonly id = 'momentum-veto';
 
-    // Запрещаем Лонг, если EMA Fast сильно ниже EMA Slow (сильный даунтренд локально)
-    // Запрещаем Шорт, если EMA Fast сильно выше EMA Slow
     evaluate(ctx: GateContext): GateResult {
         const { signal, features } = ctx;
+
+        // 🔥Фильтр ложных пробоев
+        // Если мы видим сигнал "Volume Breakout", мы требуем, 
+        // чтобы модуль Orderflow тоже кричал "ДА!" (score >= 0.5).
+        // Если Orderflow молчит (< 0.5), значит объем дутый (накрученный или останавливающий).
+        if (signal.reasonTags.includes('volume_breakout')) {
+            const ofScore = Math.abs(signal.modules.orderflow);
+            if (ofScore < 0.5) {
+                return this.reject(`Fakeout Protection: Breakout without Orderflow support (${ofScore.toFixed(2)} < 0.5)`);
+            }
+        }
 
         // 1. Проверка на флэт (оставляем)
         const momentumScore = signal.modules.momentum;
@@ -15,24 +24,6 @@ export class MomentumVetoGate extends BaseGate {
             return this.reject(`Low momentum (${momentumScore.toFixed(3)}) - Flat Market`);
         }
 
-        // 2. Расчет отклонения цены от средней (EMA 20)
-        // features.deviation - это (Price - EMA20) / ATR
-        // Если deviation > 2.0, цена улетела на 2 ATR вверх (перекуплена).
-        // Если deviation < -2.0, цена улетела на 2 ATR вниз (перепродана).
-        
-        const deviation = features.lastPriceGap * 100; // Это не совсем то, лучше взять из контекста если есть, или посчитать
-        // В FeatureEngine deviation не экспортируется напрямую, но мы можем использовать (emaFast - emaSlow) / emaSlow
-        
-        // Давайте используем простую эвристику на основе EMA разрыва
-        const priceVsEmaFast = (features.priceReturn); // Грубая оценка, но лучше использовать EMA
-        
-        // ВНИМАНИЕ: Лучше использовать готовый `features.lastPriceGap` или посчитать тут
-        // Но самое надежное - проверить 'Buy High / Sell Low' через RSI или Боллинджера, 
-        // но у нас их нет в features. 
-        
-        // ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЕ ДАННЫЕ:
-        // features.pChange30m показывает, насколько цена улетела за 30 минут.
-        
         // ЗАЩИТА ОТ ПОКУПКИ НА ХАЯХ (FOMO)
         // Если цена выросла более чем на 3% за 30 мин, и это не пробой уровня (volume_breakout),
         // то входить в ЛОНГ опасно (нужен откат).

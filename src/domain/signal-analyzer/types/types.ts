@@ -67,6 +67,7 @@ export interface Features {
     oi?: number;
     
     pChange30m: number; // новый параметр
+    pChangeUpTo30m: number; // максимальное движение за любое окно до 30м
     cvdDominance30m: number;
 }
 

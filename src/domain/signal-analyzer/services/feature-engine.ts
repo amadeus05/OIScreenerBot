@@ -102,6 +102,7 @@ export class FeatureEngine {
         const trendEma = calculateEMA(closes, TREND_EMA_PERIOD || 200);
 
         const pChange30m = this.computeTwentyMinChange(bars);
+        const pChangeUpTo30m = this.computeFlexibleChangeUpTo(bars);
 
         const { isLiqSignal, liqBias, liqStrength } = this.analyzeLiquidations(current, current.oi || 1);
         const { isAbsorption, absorptionBias } = this.analyzeAbsorption(current, deltaZ, volZ);
@@ -145,6 +146,7 @@ export class FeatureEngine {
             absorptionFlag: isAbsorption,
             absorptionBias,
             pChange30m,
+            pChangeUpTo30m,
             cvdDominance30m,
         };
     }
@@ -166,6 +168,51 @@ export class FeatureEngine {
         const pastBase = isUp ? pastBar.o : pastBar.c; // Сравниваем сравнимое
 
         return safeDivide(currentBase - pastBase, pastBase);
+    }
+
+    /**
+     * Максимальное ценовое движение за любое окно до 30 минут (текущее время - любое время внутри окна).
+     * Стартовая точка — текущая цена. Для каждой пред. свечи используем только O/C:
+     * - если свеча полностью ниже текущей — берем ее минимальное (между O и C)
+     * - если полностью выше — берем максимальное (между O и C)
+     * - если текущая цена внутри тела — игнорируем (движение ~0)
+     */
+    private computeFlexibleChangeUpTo(bars: (BarData | AggregatedBar)[], interval: number = 30): number {
+        if (bars.length < 2) return 0;
+
+        const current = bars[bars.length - 1];
+        const currentPrice = current.c;
+        const cutoffTs = current.ts - interval * 60 * 1000;
+
+        let bestChange = 0;
+
+        for (let i = bars.length - 2; i >= 0; i--) {
+            const bar = bars[i];
+            if (bar.ts < cutoffTs) break;
+
+            const bodyLow = Math.min(bar.o, bar.c);
+            const bodyHigh = Math.max(bar.o, bar.c);
+
+            let anchor = currentPrice;
+
+            if (currentPrice > bodyHigh) {
+                // Предыдущая свеча полностью ниже текущей цены — берем нижнюю точку тела.
+                anchor = bodyLow;
+            } else if (currentPrice < bodyLow) {
+                // Предыдущая свеча полностью выше — берем верхнюю точку тела.
+                anchor = bodyHigh;
+            } else {
+                // Текущая цена внутри тела — такое движение считаем шумом.
+                continue;
+            }
+
+            const change = safeDivide(currentPrice - anchor, anchor);
+            if (Math.abs(change) > Math.abs(bestChange)) {
+                bestChange = change;
+            }
+        }
+
+        return bestChange;
     }
 
     private updateRollingStats(bar: BarData | AggregatedBar): void {
@@ -244,6 +291,7 @@ export class FeatureEngine {
             absorptionFlag: false,
             absorptionBias: 0,
             pChange30m: 0,
+            pChangeUpTo30m: 0,
             cvdDominance30m: 0,
         };
     }

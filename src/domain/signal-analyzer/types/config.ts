@@ -91,16 +91,16 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
 
     weights: {
         // Балансируем веса: Orderflow главный, Momentum помогает, MeanReversion страхует
-        orderflow: 0.40,
-        meanReversion: 0.20,
-        momentum: 0.30, 
+        orderflow: 0.45,
+        meanReversion: 0.19,
+        momentum: 0.3, 
         liquidations: 0.10, // Вернем немного веса ликвидациям для точности входа
         levels: 0.00,
         oi: 0.00,
     },
 
     decision: {
-        threshold: 0.40, 
+        threshold: 0.36, 
         noTradeZone: 0.05,
     },
 

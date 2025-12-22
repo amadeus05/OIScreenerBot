@@ -90,39 +90,34 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
     },
 
     weights: {
-        // Новая комбинация модулей
-        orderflow: 0.45,      // основной источник силы (CVD, OI, flow)
-        meanReversion: 0.30,  // mean reversion (pump/dump exhaustion)
-        momentum: 0.25,       // momentum continuation
-        // Legacy (не используются, но оставляем для типизации)
-        liquidations: 0.00,
+        // Балансируем веса: Orderflow главный, Momentum помогает, MeanReversion страхует
+        orderflow: 0.40,
+        meanReversion: 0.20,
+        momentum: 0.30, 
+        liquidations: 0.10, // Вернем немного веса ликвидациям для точности входа
         levels: 0.00,
         oi: 0.00,
     },
 
     decision: {
-        // Баланс: не слишком строго, но и не слишком мягко
-        threshold: 0.45, // 0.35 — золотая середина
+        threshold: 0.40, 
         noTradeZone: 0.05,
     },
 
     position: {
         baseRiskPct: 1.0,
-        maxOpenTrades: 3, // Разрешаем больше одновременных сделок
-        // Разрешаем входить в сделки со средней уверенностью
-        minConfidence: 0.70, // Было 0.55
+        maxOpenTrades: 1,
+        minConfidence: 0.60, // Требуем уверенности
 
-        // Новые поля для синхронизации
-        defaultPortfolioSize: 100, // База для расчета, если не знаем баланс
+        defaultPortfolioSize: 100,
         maxPositionSizeUsd: 300,
         leverage: 3
     },
 
-    // ДОБАВЛЯЕМ РЕАЛЬНЫЕ КОМИССИИ BINANCE (VIP 0)
     fees: {
-        maker: 0.0002, // 0.02%
-        taker: 0.0005, // 0.05%
-        slippage: 0.0001 // 0.01% закладываем на проскальзывание при входе маркетом
+        maker: 0.0002,
+        taker: 0.0005,
+        slippage: 0.0001
     },
 
     levels: {
@@ -130,7 +125,7 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
         maxLevels: 10,
         swingToleranceAtr: 0.3,
         clusterThresholdAtr: 0.6,
-        decayRatePerBar: 0.005, // Уровни живут недолго
+        decayRatePerBar: 0.005,
         minStrengthToKeep: 0.15,
         minTouchesForConfirmed: 2,
         touchProximityAtr: 0.4,
@@ -150,21 +145,20 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
         atrPeriod: 14,
         emaFastPeriod: 8,
         emaSlowPeriod: 21,
+        entryOffsetAtrMult: 0.00,
 
-        // === ИЗМЕНЕНИЕ 1: Лимитный вход ===
-        // Ставим лимитку на 0.15 ATR лучше цены закрытия.
-        // Это фильтрует "FOMO-входы" на хаях свечи.
-        entryOffsetAtrMult: 0.00, // Было 0.0
+        // === ЗОЛОТАЯ СЕРЕДИНА ===
+        // SL 1.5 ATR: Выдерживает шум, но не замораживает депозит.
+        slAtrMultMin: 1.8, 
+        slAtrMultMax: 2.5,
+        slStructuralBars: 8,
 
-        // === ИЗМЕНЕНИЕ 2: Чуть больше воздуха стопу ===
-        // Было 0.4 - слишком тесно, выбивает шумом.
-        slAtrMultMin: 2.0, // Чуть шире минимальный стоп
-        slAtrMultMax: 3.5,
-        slStructuralBars: 10, // Смотрим на 3 свечи назад для поиска лоу, а не 2
-
-        // Тейки: более агрессивный R:R для компенсации низкого winrate
-        tpRatios: [1.5, 3.0], // Было [1.5, 3.0] → минимум 2:1 R:R
+        // TP: Первый тейк ровно на 1 R (равен риску).
+        // Это обеспечивает психологический комфорт и быстрый выход в б/у.
+        // Второй тейк ловит хвосты.
+        tpRatios: [0.8, 2.0], 
     },
+    
 };
 /**
  * Module-specific configuration

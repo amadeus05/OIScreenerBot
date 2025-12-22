@@ -1,7 +1,3 @@
-// ========================================================================
-// FILE: src/domain/signal-analyzer/rules/scenarios/regime.scenarios.ts
-// ========================================================================
-
 import { Features } from '../../types';
 import { ModuleWeights } from '../../types/config';
 import { MarketRegime } from '../../services/regime-supervisor';
@@ -15,10 +11,6 @@ export interface RegimeScenario {
   weights: ModuleWeights;
 }
 
-/**
- * Базовый набор сценариев режима рынка.
- * Если ни один не сработает, RegimeSupervisor вернёт fallback RANGING.
- */
 export const RegimeScenarios: RegimeScenario[] = [
   {
     id: 'trend_up',
@@ -26,18 +18,17 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 80,
     minMatchRatio: 0.6,
     conditions: [
-      (f, price) => price > f.trendEma,                  // Цена выше EMA200
-      (f) => f.emaFast > f.emaSlow,                     // Локальный ап-тренд
-      (f) => f.pChange30m > 0.01,                       // Рост за 30м > 1%
-      (f) => f.volZ > -0.3                              // Нет явного дефицита объёма
+      (f, price) => price > f.trendEma,
+      (f) => f.emaFast > f.emaSlow,
+      // 🔥 БЫЛО 0.01 (1%), СТАЛО 0.005 (0.5%) — ловим начало движения
+      (f) => f.pChange30m > 0.005,       
+      (f) => f.volZ > -0.3
     ],
     weights: {
-      orderflow: 0.40,
-      momentum: 0.45,
-      meanReversion: 0.15,
-      oi: 0.0,
-      liquidations: 0.0,
-      levels: 0.0,
+      momentum: 0.80,      // БЫЛО 0.70. Увеличиваем! В тренде главное — инерция.
+      orderflow: 0.20,
+      meanReversion: 0.00, // Отключаем полностью в тренде. Не надо ловить откаты, надо ехать.
+      oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
   {
@@ -46,18 +37,17 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 80,
     minMatchRatio: 0.6,
     conditions: [
-      (f, price) => price < f.trendEma,                  // Цена ниже EMA200
-      (f) => f.emaFast < f.emaSlow,                     // Локальный даун-тренд
-      (f) => f.pChange30m < -0.01,                      // Падение за 30м > 1%
+      (f, price) => price < f.trendEma,
+      (f) => f.emaFast < f.emaSlow,
+      // 🔥 БЫЛО -0.01, СТАЛО -0.005
+      (f) => f.pChange30m < -0.005,
       (f) => f.volZ > -0.3
     ],
     weights: {
-      orderflow: 0.40,
-      momentum: 0.45,
-      meanReversion: 0.15,
-      oi: 0.0,
-      liquidations: 0.0,
-      levels: 0.0,
+      momentum: 0.80,      // БЫЛО 0.70. Увеличиваем! В тренде главное — инерция.
+      orderflow: 0.20,
+      meanReversion: 0.00, // Отключаем полностью в тренде. Не надо ловить откаты, надо ехать.
+      oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
   {
@@ -66,16 +56,15 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 90,
     minMatchRatio: 0.5,
     conditions: [
-      (f) => Math.abs(f.volZ) > 2.0 || Math.abs(f.pChange30m) > 0.04, // Сильная волатильность/движение
-      (f) => Math.abs(f.priceReturn) > 0.002,                         // Есть импульс внутри бара
+      // Чуть снизили порог волатильности для входа
+      (f) => Math.abs(f.volZ) > 1.5 || Math.abs(f.pChange30m) > 0.03, 
+      (f) => Math.abs(f.priceReturn) > 0.002,
     ],
     weights: {
-      orderflow: 0.50,
-      momentum: 0.35,
-      meanReversion: 0.15,
-      oi: 0.0,
-      liquidations: 0.0,
-      levels: 0.0,
+      orderflow: 0.40,
+      momentum: 0.40, // Баланс
+      meanReversion: 0.20,
+      oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
   {
@@ -84,16 +73,15 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 100,
     minMatchRatio: 0.7,
     conditions: [
-      (f) => Math.abs(f.pChange30m) > 0.08,  // >8% за 30м
-      (f) => Math.abs(f.volZ) > 3.0,         // Кульминационный объём
+      (f) => Math.abs(f.pChange30m) > 0.08,
+      (f) => Math.abs(f.volZ) > 3.0,
     ],
     weights: {
-      orderflow: 0.55,
-      momentum: 0.30,
-      meanReversion: 0.15,
-      oi: 0.0,
-      liquidations: 0.0,
-      levels: 0.0,
+      // В экстремумах только разворот!
+      meanReversion: 0.90, 
+      orderflow: 0.10,
+      momentum: 0.00, // Не лезем в уходящий поезд
+      oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
 ];

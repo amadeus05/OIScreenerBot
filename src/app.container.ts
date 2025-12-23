@@ -36,6 +36,7 @@ import { AntiSpamGate } from './domain/signal-analyzer/gatekeeper/gates/anti-spa
 import { MeanReversionGate } from './domain/signal-analyzer/gatekeeper/gates/mean-reversion.gate';
 import { TradingSessionGate } from './domain/signal-analyzer/gatekeeper/gates/trading-session.gate';
 import { PumpScoutBot } from './app';
+import { MomentumVetoGate } from '@domain/signal-analyzer/gatekeeper/gates/momentum-veto.gate';
 
 export function registerDependencies(): void {
   const container = DIContainer.getInstance();
@@ -94,10 +95,11 @@ export function registerDependencies(): void {
 
   // 1. Регистрируем массив гейтов
   container.bind('IGates', () => [
+    new AntiSpamGate(),
+    // new TradingSessionGate(),
+    // new MomentumVetoGate(),
     new TrendAlignmentGate(),
     new MeanReversionGate(),
-    new TradingSessionGate(),
-    new AntiSpamGate()
   ]);
 
   // 2. Регистрируем сам Gatekeeper

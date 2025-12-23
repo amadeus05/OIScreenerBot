@@ -176,6 +176,7 @@ async function runRealBacktest() {
         // Other fiats
         'GBPUSDT',    // British Pound
         'AUDUSDT',    // Australian Dollar (но часто это Audius токен!)
+        'PAXGUSDT',   // PAXG — это токенизированное золото (Paxos Gold) 
     ];
 
     for (const { symbol } of allSymbols) {

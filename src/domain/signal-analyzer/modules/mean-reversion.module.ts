@@ -20,18 +20,18 @@ export class MeanReversionModule extends BaseModule {
 
     const dominantImpulse = this.getDominantImpulse(features);
 
+    // 🔥 Композитное истощение (не включается от одного фактора)
+    const exhaustionScore =
+      (features.volZ > 2.5 ? 1 : 0) +
+      (dominantImpulse >= 0.05 && features.flowImb < 0.15 ? 1 : 0) +
+      (dominantImpulse >= 0.05 && features.dCVD < 0 ? 1 : 0) +
+      (dominantImpulse <= -0.05 && features.flowImb > -0.15 ? 1 : 0) +
+      (dominantImpulse <= -0.05 && features.dCVD > 0 ? 1 : 0);
+
     const exhaustionContext = {
       currentPrice: currentBar.c,
       marketContext,
-      // Detects exhaustion for BOTH pumps and dumps
-      isExhausted:
-        features.volZ > 2.5 ||
-        // PUMP exhaustion (for SHORT)
-        (dominantImpulse >= 0.05 && features.flowImb < 0.15) ||
-        (dominantImpulse >= 0.05 && features.dCVD < 0) ||
-        // DUMP exhaustion (for LONG) - symmetric logic
-        (dominantImpulse <= -0.05 && features.flowImb > -0.15) ||
-        (dominantImpulse <= -0.05 && features.dCVD > 0),
+      isExhausted: exhaustionScore >= 2,
     };
 
     for (const scenario of MeanReversionScenarios) {
@@ -47,7 +47,7 @@ export class MeanReversionModule extends BaseModule {
         const pChange = dominantImpulse;
         if (pChange && Math.abs(pChange) > 0.08) {
           const excess = Math.abs(pChange) - 0.08;
-          const multiplier = 1 + Math.min(excess * 6, 0.4);
+          const multiplier = 1 + Math.min(excess * 4, 0.25); // ⛔ ограничили
           score *= multiplier;
         }
       }
@@ -67,15 +67,13 @@ export class MeanReversionModule extends BaseModule {
     );
   }
 
+  // ✅ ФИКС: импульс всегда консистентен по знаку и модулю
   private getDominantImpulse(features: Features): number {
     const { pChange30m = 0, pChangeUpTo30m = 0 } = features;
-    // Берём max(|pChangeUpTo30m|, |pChange30m|) со знаком гибкого окна
-    const mag = Math.abs(pChangeUpTo30m) >= Math.abs(pChange30m)
-      ? Math.abs(pChangeUpTo30m)
-      : Math.abs(pChange30m);
-    const sign = Math.sign(pChangeUpTo30m);
-    return sign * mag;
+    return Math.abs(pChangeUpTo30m) >= Math.abs(pChange30m)
+      ? pChangeUpTo30m
+      : pChange30m;
   }
 
-  reset(): void { }
+  reset(): void {}
 }

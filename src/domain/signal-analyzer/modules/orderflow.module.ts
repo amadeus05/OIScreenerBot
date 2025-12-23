@@ -50,7 +50,7 @@ export class OrderflowModule extends BaseModule {
         }
 
         // 3. Flow Imbalance (агрессивный buying/selling)
-        if (Math.abs(flowImb) > 0.18 && volZ > 0.5) {
+        if (Math.abs(flowImb) > 0.18 && volZ > 0.5 && Math.abs(priceReturn) < 0.01) {
             score += flowImb > 0 ? 0.4 : -0.4; // положительный flowImb = больше buy volume → long
             tags.add('flow_imbalance');
         }

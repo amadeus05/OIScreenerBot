@@ -14,6 +14,11 @@ export class MomentumModule extends BaseModule {
 
         const { pChange30m, priceReturn, atr, volZ } = features;
 
+        // ⛔ GUARD: не лезем в климакс
+        if (Math.abs(pChange30m) > 0.07 && volZ > 2.5) {
+            return this.createOutput(0, 0.2, ['extreme_guard']);
+        }
+
         // 1. Pullback в сильном движении (классика)
         if (Math.abs(pChange30m) >= this.IMPULSE_THRESH) {
             const impulseDir = pChange30m > 0 ? 1 : -1;

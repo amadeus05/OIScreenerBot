@@ -10,92 +10,111 @@ interface TrialResult {
     config: PartialConfig;
 }
 
-const TRIALS = Number(process.env.TRIALS ?? 20);
+const TRIALS = Number(process.env.TRIALS ?? 50); // Делаем больше прогонов
 const START_TS = process.env.START_TS ? Number(process.env.START_TS) : undefined;
 const END_TS = process.env.END_TS ? Number(process.env.END_TS) : undefined;
-const MAX_SYMBOLS = process.env.MAX_SYMBOLS ? Number(process.env.MAX_SYMBOLS) : 25;
-const INITIAL_BALANCE = process.env.INIT_BALANCE ? Number(process.env.INIT_BALANCE) : 100;
+const MAX_SYMBOLS = process.env.MAX_SYMBOLS ? Number(process.env.MAX_SYMBOLS) : 40;
+const INITIAL_BALANCE = 100;
 
 const rand = (min: number, max: number) => min + Math.random() * (max - min);
 const randInt = (min: number, max: number) => Math.floor(rand(min, max + 1));
 const pick = <T>(arr: T[]): T => arr[randInt(0, arr.length - 1)];
 
+// 1. Веса оптимизируем (это мозг бота)
 function sampleWeights(): SignalAnalyzerConfig['weights'] {
+    // Даем приоритет Orderflow и Momentum, как в успешных тестах
     const orderflow = rand(0.3, 0.6);
-    const meanReversion = rand(0.15, 0.4);
-    const momentum = rand(0.15, 0.35);
-    const sum = orderflow + meanReversion + momentum;
+    const meanReversion = rand(0.1, 0.3); // Меньше веса на разворот
+    const momentum = rand(0.2, 0.5);
+    
+    // Liquidations иногда полезны
+    const liquidations = Math.random() > 0.5 ? rand(0.05, 0.15) : 0;
+
+    const sum = orderflow + meanReversion + momentum + liquidations;
     return {
-        orderflow: Number((orderflow / sum).toFixed(4)),
-        meanReversion: Number((meanReversion / sum).toFixed(4)),
-        momentum: Number((momentum / sum).toFixed(4)),
-        liquidations: 0,
-        levels: 0,
+        orderflow: Number((orderflow / sum).toFixed(2)),
+        meanReversion: Number((meanReversion / sum).toFixed(2)),
+        momentum: Number((momentum / sum).toFixed(2)),
+        liquidations: Number((liquidations / sum).toFixed(2)),
+        levels: 0, // Уровни пока отключаем (упрощение)
         oi: 0,
     };
 }
 
 function sampleConfig(): PartialConfig {
-    const emaFast = randInt(5, 12);
-    const emaSlow = randInt(Math.max(emaFast + 6, 18), 34);
-    const slMin = rand(1.4, 2.4);
-    const slMax = Math.max(slMin + 0.5, rand(slMin + 0.4, 4.0));
+    // Генерируем SL (танковый или средний)
+    const slMin = rand(1.5, 2.5); 
+    const slMax = slMin + rand(0.5, 1.5);
+
+    // Генерируем TP. 
+    // Важно: TP1 должен быть достижимым (0.7 - 1.2 R), TP2 для "ракет"
+    const tp1Ratio = rand(0.7, 1.2);
+    const tp2Ratio = rand(2.0, 4.0);
 
     return {
         weights: sampleWeights(),
         decision: {
-            threshold: Number(rand(0.3, 0.65).toFixed(3)),
-            noTradeZone: Number(rand(0.0, 0.12).toFixed(3)),
+            // Ищем баланс между фильтрацией шума и входами
+            threshold: Number(rand(0.35, 0.55).toFixed(2)), 
+            noTradeZone: 0.05,
         },
         position: {
-            baseRiskPct: Number(rand(0.25, 1.5).toFixed(3)),
-            maxOpenTrades: randInt(1, 4),
-            minConfidence: Number(rand(0.55, 0.8).toFixed(3)),
-            defaultPortfolioSize: 100, // базовая сумма для расчета если баланс не передан
-            maxPositionSizeUsd: randInt(100, 600),
-            leverage: Number(rand(2, 6).toFixed(2)),
-        },
-        levels: {
-            swingWindow: randInt(3, 9),
-            maxLevels: randInt(6, 14),
-            swingToleranceAtr: Number(rand(0.2, 0.5).toFixed(3)),
-            clusterThresholdAtr: Number(rand(0.4, 0.9).toFixed(3)),
-            decayRatePerBar: Number(rand(0.003, 0.015).toFixed(4)),
-            minStrengthToKeep: Number(rand(0.1, 0.2).toFixed(3)),
-            minTouchesForConfirmed: randInt(1, 3),
-            touchProximityAtr: Number(rand(0.25, 0.55).toFixed(3)),
-            maxTouchHistory: randInt(10, 24),
-            breakoutConfirmBars: randInt(1, 3),
-            breakoutVolumeRatio: Number(rand(1.2, 2.5).toFixed(3)),
-            priorVolBars: randInt(3, 8),
+            // 🛑 ЗАМОРОЖЕНО: Риск и Плечо фиксированы!
+            // Мы ищем лучшую логику, а не кто больше рискнет.
+            baseRiskPct: 1.0, 
+            maxOpenTrades: 1, // Тестируем в режиме "Снайпер" (1 сделка) для чистоты
+            minConfidence: Number(rand(0.50, 0.75).toFixed(2)),
+            defaultPortfolioSize: INITIAL_BALANCE,
+            maxPositionSizeUsd: INITIAL_BALANCE * 3,
+            leverage: 3, 
         },
         technical: {
-            atrPeriod: randInt(10, 20),
-            emaFastPeriod: emaFast,
-            emaSlowPeriod: emaSlow,
-            entryOffsetAtrMult: Number(rand(0, 0.3).toFixed(3)),
-            slAtrMultMin: Number(slMin.toFixed(3)),
-            slAtrMultMax: Number(slMax.toFixed(3)),
-            slStructuralBars: randInt(5, 14),
-            tpRatios: pick([
-                [1.3, 2.2],
-                [1.5, 3.0],
-                [2.0, 3.5],
-            ]),
+            // 🛑 ЗАМОРОЖЕНО: Стандартные периоды
+            atrPeriod: 14,
+            emaFastPeriod: 8,
+            emaSlowPeriod: 21,
+            
+            entryOffsetAtrMult: 0, // Вход по рынку
+            
+            // ОПТИМИЗИРУЕТСЯ: Стопы и Тейки
+            slAtrMultMin: Number(slMin.toFixed(2)),
+            slAtrMultMax: Number(slMax.toFixed(2)),
+            slStructuralBars: randInt(5, 12),
+            
+            tpRatios: [
+                Number(tp1Ratio.toFixed(2)), 
+                Number(tp2Ratio.toFixed(2))
+            ],
         },
+        // Остальное можно не менять или взять дефолт
+        levels: { 
+            swingWindow: 5, maxLevels: 10, swingToleranceAtr: 0.3, clusterThresholdAtr: 0.6,
+            decayRatePerBar: 0.005, minStrengthToKeep: 0.15, minTouchesForConfirmed: 2,
+            touchProximityAtr: 0.4, maxTouchHistory: 20, breakoutConfirmBars: 1, breakoutVolumeRatio: 1.5, priorVolBars: 5 
+        }
     };
 }
 
+// Умная оценка: Нам нужен стабильный рост, а не "казино"
 function scoreMetrics(m: BacktestMetrics): number {
-    const pnl = m.netPnl;
-    const ddPenalty = 0.7 * Math.max(m.maxDrawdown, 0);
-    const wrPenalty = m.trades >= 5 && m.winrate < 40 ? (40 - m.winrate) * 0.2 : 0;
-    const tradePenalty = m.trades < 3 ? 5 : 0;
-    return pnl - ddPenalty - wrPenalty - tradePenalty;
+    // 1. Профит Фактор (грубый аналог): Сколько заработали / Макс просадка
+    // Добавляем 1 к DD, чтобы не делить на ноль
+    const calmarLike = m.netPnl / (Math.abs(m.maxDrawdown) + 1);
+
+    // 2. Штраф за малый винрейт (хотим > 40%)
+    let wrScore = 0;
+    if (m.winrate < 40) wrScore -= 20;
+    if (m.winrate > 50) wrScore += 10;
+
+    // 3. Штраф за малое кол-во сделок (статистическая значимость)
+    if (m.trades < 10) return -1000; 
+
+    // Итоговый скор: Прибыль с учетом риска + Бонус за Винрейт
+    return (m.netPnl * 2) - (m.maxDrawdown * 4) + wrScore;
 }
 
 async function main() {
-    console.log(`🚀 Autotune start | trials=${TRIALS} | maxSymbols=${MAX_SYMBOLS} | start=${START_TS ?? 'none'} | end=${END_TS ?? 'none'}`);
+    console.log(`🚀 Smart Autotune start | trials=${TRIALS}`);
 
     const leaderboard: TrialResult[] = [];
 
@@ -109,24 +128,34 @@ async function main() {
             initialBalance: INITIAL_BALANCE,
             skipWarmup: false,
             silent: true,
-            maxTrades: undefined,
+            maxTrades: undefined, // Берем из конфига (там 1)
         });
 
         const score = scoreMetrics(res.metrics);
-        leaderboard.push({ score, metrics: res.metrics, config: cfg });
-        leaderboard.sort((a, b) => b.score - a.score);
-        if (leaderboard.length > 5) leaderboard.length = 5;
+        
+        // Сохраняем только прибыльные
+        if (res.metrics.netPnl > 0) {
+            leaderboard.push({ score, metrics: res.metrics, config: cfg });
+            leaderboard.sort((a, b) => b.score - a.score);
+            if (leaderboard.length > 5) leaderboard.length = 5;
+        }
 
-        const best = leaderboard[0];
-        console.log(
-            `[${i + 1}/${TRIALS}] score=${score.toFixed(2)} pnl=${res.metrics.netPnl.toFixed(2)} wr=${res.metrics.winrate.toFixed(1)}% dd=${res.metrics.maxDrawdown.toFixed(2)} trades=${res.metrics.trades} | best=${best.score.toFixed(2)}`
-        );
+        const bestScore = leaderboard.length > 0 ? leaderboard[0].score.toFixed(2) : 'N/A';
+        const bestPnl = leaderboard.length > 0 ? leaderboard[0].metrics.netPnl.toFixed(2) : '0';
+
+        if (i % 5 === 0) { // Логируем каждые 5 прогонов
+             console.log(`[${i + 1}/${TRIALS}] Curr: PnL ${res.metrics.netPnl.toFixed(2)}% | Best: PnL ${bestPnl}% (Score ${bestScore})`);
+        }
     }
 
-    console.log('🥇 Top configs:');
+    console.log('\n🏆 WINNING CONFIGURATIONS 🏆');
     leaderboard.forEach((r, idx) => {
-        console.log(`\n#${idx + 1} score=${r.score.toFixed(2)} pnl=${r.metrics.netPnl.toFixed(2)} wr=${r.metrics.winrate.toFixed(1)}% dd=${r.metrics.maxDrawdown.toFixed(2)} trades=${r.metrics.trades}`);
-        console.dir(r.config, { depth: null });
+        console.log(`\n#${idx + 1} SCORE: ${r.score.toFixed(2)} | PnL: ${r.metrics.netPnl.toFixed(2)}% | WR: ${r.metrics.winrate.toFixed(1)}% | DD: ${r.metrics.maxDrawdown.toFixed(2)}% | Trades: ${r.metrics.trades}`);
+        console.log('Key Params:');
+        console.log(`  Threshold: ${r.config.decision?.threshold}`);
+        console.log(`  Weights: OF=${r.config.weights?.orderflow}, Mom=${r.config.weights?.momentum}, MR=${r.config.weights?.meanReversion}`);
+        console.log(`  SL: ${r.config.technical?.slAtrMultMin} - ${r.config.technical?.slAtrMultMax} ATR`);
+        console.log(`  TP: ${r.config.technical?.tpRatios?.join(', ')}`);
     });
 }
 
@@ -134,4 +163,3 @@ main().catch(err => {
     console.error('Autotune failed', err);
     process.exit(1);
 });
-

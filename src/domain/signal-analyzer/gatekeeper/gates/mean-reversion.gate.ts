@@ -8,9 +8,10 @@ import { GateContext, GateResult } from '../types';
 export class MeanReversionGate extends BaseGate {
     readonly id = 'mean-reversion-limiter';
 
-    // Минимальное изменение цены (0.2%), чтобы считать это импульсом.
-    // 🔥 UPDATED: Теперь проверяем 30-минутное движение, а не 1-минутное
-    private readonly minImpulse = 0.02; // 2% за 30 минут для реального пампа (было 0.2% за 1 мин)
+    // 🔥 PRO: ATR-normalized thresholds (вместо фиксированных %)
+    private readonly MIN_IMPULSE_ATR = 1.5;    // 1.5 ATR = минимальный импульс для MR
+    private readonly WEAK_IMPULSE_ATR = 3.0;   // 3 ATR = слабый импульс (требует подтверждения тренда)
+    private readonly MAX_IMPULSE_ATR = 8.0;    // 8 ATR = слишком сильная ракета (не шортим)
 
     evaluate(ctx: GateContext): GateResult {
         const { features, signal } = ctx;
@@ -27,20 +28,18 @@ export class MeanReversionGate extends BaseGate {
             return this.allow();
         }
 
-        // 2. Проверка импульса (Pump Strength)
-        // 🔥 UPDATED: Берем максимальное движение за 30м (точное или любое окно внутри)
-        // Если цена не выросла значительно за полчаса, то это не памп, и разворачивать тут нечего.
-        const impulseStrength = Math.abs(this.getDominantImpulse(features));
+        // 2. Проверка импульса (Pump Strength) - теперь в ATR
+        const impulseStrengthATR = Math.abs(features.trueImpulseATR);
 
-        // Если движение меньше 2% (или настройки minImpulse), то это шум
-        if (impulseStrength < this.minImpulse) {
-            return this.reject(`No significant impulse (${(impulseStrength * 100).toFixed(2)}% < ${(this.minImpulse * 100)}%)`);
+        // Если импульс меньше 1.5 ATR, это шум
+        if (impulseStrengthATR < this.MIN_IMPULSE_ATR) {
+            return this.reject(`No significant impulse (${impulseStrengthATR.toFixed(1)} ATR < ${this.MIN_IMPULSE_ATR} ATR)`);
         }
 
-        // 2.1 Анти-контртренд для слабых MR: если импульс слабее 5% и идем против EMA200, отбрасываем
+        // 2.1 Анти-контртренд для слабых MR: если импульс слабее 3 ATR и идем против EMA200, отбрасываем
         const priceAboveTrend = features.emaFast > features.trendEma;
         const priceBelowTrend = features.emaFast < features.trendEma;
-        const weakImpulse = impulseStrength < 0.05; // 5% за 30 минут считаем слабым для агрессивного разворота
+        const weakImpulse = impulseStrengthATR < this.WEAK_IMPULSE_ATR;
 
         if (weakImpulse) {
             if (signal.action === 'SHORT' && priceAboveTrend) {
@@ -52,32 +51,20 @@ export class MeanReversionGate extends BaseGate {
         }
 
         // 3. Подтверждение объемом
-        // V-образные развороты требуют кульминации объема.
-        // Если volZ < 0 (объем ниже среднего), рынок может просто дрейфовать дальше.
         if (features.volZ < 0) {
             return this.reject(`No volume confirmation (Z: ${features.volZ.toFixed(2)})`);
         }
 
         if (signal.action === 'SHORT' && features.cvdDominance30m > 0.05) {
-             return this.reject(`Aggressive 30m Buying (CVD Dom: ${(features.cvdDominance30m * 100).toFixed(1)}%)`);
+            return this.reject(`Aggressive 30m Buying (CVD Dom: ${(features.cvdDominance30m * 100).toFixed(1)}%)`);
         }
-        
+
         // 🔥 НОВОЕ: Проверка МАКСИМАЛЬНОГО импульса (God Candle Protection)
-        // Если цена выросла более чем на 12% за 30 минут — это ракета, не шортим.
-        // Обычно такие движения продолжаются.
-        if (signal.action === 'SHORT' && impulseStrength > 0.12) {
-             return this.reject(`Pump too strong for reversal (${(impulseStrength * 100).toFixed(2)}%)`);
+        // Если цена прошла более 8 ATR за 30 минут — это ракета, не шортим.
+        if (signal.action === 'SHORT' && impulseStrengthATR > this.MAX_IMPULSE_ATR) {
+            return this.reject(`Pump too strong for reversal (${impulseStrengthATR.toFixed(1)} ATR)`);
         }
 
         return this.allow();
-    }
-
-    private getDominantImpulse(features: GateContext['features']): number {
-        const base = features.pChange30m ?? 0;
-        const flexible = features.pChangeUpTo30m ?? 0;
-        // Берём max(|flexible|, |base|) со знаком гибкого окна
-        const mag = Math.abs(flexible) >= Math.abs(base) ? Math.abs(flexible) : Math.abs(base);
-        const sign = Math.sign(flexible);
-        return sign * mag;
     }
 }

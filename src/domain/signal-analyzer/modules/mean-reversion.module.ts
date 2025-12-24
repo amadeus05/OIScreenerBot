@@ -5,6 +5,10 @@ import { MeanReversionScenarios } from '../rules/scenarios/mean-reversion.scenar
 export class MeanReversionModule extends BaseModule {
   readonly name = 'meanReversion' as const;
 
+  // 🔥 PRO: ATR-normalized thresholds
+  private readonly MIN_IMPULSE_ATR = 3.0;  // 3 ATR = минимальный импульс для mean reversion
+  private readonly STRONG_IMPULSE_ATR = 5.0; // 5 ATR = сильный импульс (множитель силы)
+
   analyze(
     features: Features,
     bars: (BarData | AggregatedBar)[],
@@ -18,20 +22,22 @@ export class MeanReversionModule extends BaseModule {
     let maxReliability = 0;
     const activeTags = new Set<string>();
 
-    const dominantImpulse = this.getDominantImpulse(features);
+    // 🔥 Используем trueImpulseATR вместо pChange30m
+    const dominantImpulseATR = features.trueImpulseATR;
 
     const exhaustionContext = {
       currentPrice: currentBar.c,
       marketContext,
-      // Detects exhaustion for BOTH pumps and dumps
+      // 🔥 Теперь exhaustion определяется через ATR
+      // 3 ATR = сильный памп/дамп, достаточно для разворота
       isExhausted:
         features.volZ > 2.5 ||
         // PUMP exhaustion (for SHORT)
-        (dominantImpulse >= 0.05 && features.flowImb < 0.15) ||
-        (dominantImpulse >= 0.05 && features.dCVD < 0) ||
+        (dominantImpulseATR >= this.MIN_IMPULSE_ATR && features.flowImb < 0.15) ||
+        (dominantImpulseATR >= this.MIN_IMPULSE_ATR && features.dCVD < 0) ||
         // DUMP exhaustion (for LONG) - symmetric logic
-        (dominantImpulse <= -0.05 && features.flowImb > -0.15) ||
-        (dominantImpulse <= -0.05 && features.dCVD > 0),
+        (dominantImpulseATR <= -this.MIN_IMPULSE_ATR && features.flowImb > -0.15) ||
+        (dominantImpulseATR <= -this.MIN_IMPULSE_ATR && features.dCVD > 0),
     };
 
     for (const scenario of MeanReversionScenarios) {
@@ -43,11 +49,11 @@ export class MeanReversionModule extends BaseModule {
 
       let score = scenario.baseScore;
 
+      // 🔥 Множитель силы теперь на основе ATR
       if (scenario.useStrengthMultiplier && exhaustionContext.isExhausted) {
-        const pChange = dominantImpulse;
-        if (pChange && Math.abs(pChange) > 0.08) {
-          const excess = Math.abs(pChange) - 0.08;
-          const multiplier = 1 + Math.min(excess * 6, 0.4);
+        if (Math.abs(dominantImpulseATR) > this.STRONG_IMPULSE_ATR) {
+          const excess = Math.abs(dominantImpulseATR) - this.STRONG_IMPULSE_ATR;
+          const multiplier = 1 + Math.min(excess * 0.08, 0.4); // 0.08 per ATR
           score *= multiplier;
         }
       }
@@ -67,13 +73,6 @@ export class MeanReversionModule extends BaseModule {
     );
   }
 
-  // ✅ ФИКС: импульс всегда консистентен по знаку и модулю
-  private getDominantImpulse(features: Features): number {
-    const { pChange30m = 0, pChangeUpTo30m = 0 } = features;
-    return Math.abs(pChangeUpTo30m) >= Math.abs(pChange30m)
-      ? pChangeUpTo30m
-      : pChange30m;
-  }
-
-  reset(): void {}
+  reset(): void { }
 }
+

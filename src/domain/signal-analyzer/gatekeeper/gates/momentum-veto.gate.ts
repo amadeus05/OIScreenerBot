@@ -4,8 +4,33 @@ import { GateContext, GateResult } from '../types';
 export class MomentumVetoGate extends BaseGate {
     readonly id = 'momentum-veto';
 
+    // 🔥 PRO: ATR-normalized threshold for overextension
+    private readonly OVEREXTENDED_ATR = 2.0;  // 2 ATR = перекуплено/перепродано
+
     evaluate(ctx: GateContext): GateResult {
         const { signal, features } = ctx;
+
+
+         // 🔥 ОБЯЗАТЕЛЬНОЕ ПОДТВЕРЖДЕНИЕ ПОТОКОМ
+        // Если мы хотим ЛОНГ, поток (CVD) не должен падать.
+        // Если мы хотим ШОРТ, поток не должен расти.
+        
+        // dCVD - это изменение кумулятивного объема.
+        // flowImb - это дисбаланс покупок/продаж.
+
+        if (signal.action === 'LONG') {
+            // Если CVD падает ИЛИ Продавцы доминируют -> ЗАПРЕТ
+            if (features.dCVD < 0 && features.flowImb < -0.05) {
+                return this.reject(`No Orderflow Support for LONG (dCVD < 0, Imb: ${features.flowImb.toFixed(2)})`);
+            }
+        }
+
+        if (signal.action === 'SHORT') {
+            // Если CVD растет ИЛИ Покупатели доминируют -> ЗАПРЕТ
+            if (features.dCVD > 0 && features.flowImb > 0.05) {
+                return this.reject(`No Orderflow Support for SHORT (dCVD > 0, Imb: ${features.flowImb.toFixed(2)})`);
+            }
+        }
 
         // 🔥Фильтр ложных пробоев
         // Если мы видим сигнал "Volume Breakout", мы требуем, 
@@ -25,20 +50,18 @@ export class MomentumVetoGate extends BaseGate {
         }
 
         // ЗАЩИТА ОТ ПОКУПКИ НА ХАЯХ (FOMO)
-        // Если цена выросла более чем на 3% за 30 мин, и это не пробой уровня (volume_breakout),
-        // то входить в ЛОНГ опасно (нужен откат).
-        if (signal.action === 'LONG' && features.pChange30m > 0.03) {
+        // 🔥 Теперь используем ATR-нормализованный порог
+        if (signal.action === 'LONG' && features.trueImpulseATR > this.OVEREXTENDED_ATR) {
             if (!signal.reasonTags.includes('volume_breakout')) {
-                 return this.reject(`Price overextended UP (+${(features.pChange30m*100).toFixed(1)}%) - waiting for dip`);
+                return this.reject(`Price overextended UP (+${features.trueImpulseATR.toFixed(1)} ATR) - waiting for dip`);
             }
         }
 
         // ЗАЩИТА ОТ ПРОДАЖИ НА ДНЕ (Panic Sell)
-        // Если цена упала более чем на 3% за 30 мин, шортить поздно.
-        if (signal.action === 'SHORT' && features.pChange30m < -0.03) {
-             if (!signal.reasonTags.includes('volume_breakout')) {
-                 return this.reject(`Price overextended DOWN (${(features.pChange30m*100).toFixed(1)}%) - waiting for bounce`);
-             }
+        if (signal.action === 'SHORT' && features.trueImpulseATR < -this.OVEREXTENDED_ATR) {
+            if (!signal.reasonTags.includes('volume_breakout')) {
+                return this.reject(`Price overextended DOWN (${features.trueImpulseATR.toFixed(1)} ATR) - waiting for bounce`);
+            }
         }
 
         // 3. Проверка соответствия моментума (оставляем старую логику)

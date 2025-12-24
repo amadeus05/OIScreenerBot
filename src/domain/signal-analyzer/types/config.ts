@@ -68,6 +68,7 @@ export interface TechnicalConfig {
     atrPeriod: number;
     emaFastPeriod: number;
     emaSlowPeriod: number;
+    trendEmaPeriod: number;      // EMA для глобального тренда (конфигурируемый)
     entryOffsetAtrMult: number;
     slAtrMultMin: number;
     slAtrMultMax: number;
@@ -91,16 +92,16 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
 
     weights: {
         // Балансируем веса: Orderflow главный, Momentum помогает, MeanReversion страхует
-        orderflow: 0.45,
-        meanReversion: 0.19,
-        momentum: 0.3, 
+        orderflow: 0.40,
+        meanReversion: 0.25,
+        momentum: 0.35,
         liquidations: 0.10, // Вернем немного веса ликвидациям для точности входа
         levels: 0.00,
         oi: 0.00,
     },
 
     decision: {
-        threshold: 0.36, 
+        threshold: 0.36,
         noTradeZone: 0.05,
     },
 
@@ -145,20 +146,21 @@ export const DEFAULT_CONFIG: SignalAnalyzerConfig = {
         atrPeriod: 14,
         emaFastPeriod: 8,
         emaSlowPeriod: 21,
+        trendEmaPeriod: 200,     // EMA200 для тренда
         entryOffsetAtrMult: 0.00,
 
         // === ЗОЛОТАЯ СЕРЕДИНА ===
         // SL 1.5 ATR: Выдерживает шум, но не замораживает депозит.
-        slAtrMultMin: 1.8, 
+        slAtrMultMin: 1.8,
         slAtrMultMax: 2.5,
         slStructuralBars: 8,
 
         // TP: Первый тейк ровно на 1 R (равен риску).
         // Это обеспечивает психологический комфорт и быстрый выход в б/у.
         // Второй тейк ловит хвосты.
-        tpRatios: [0.8, 2.0], 
+        tpRatios: [0.8, 2.0],
     },
-    
+
 };
 /**
  * Module-specific configuration

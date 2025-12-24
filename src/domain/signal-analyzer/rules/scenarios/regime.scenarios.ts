@@ -12,22 +12,25 @@ export interface RegimeScenario {
 }
 
 export const RegimeScenarios: RegimeScenario[] = [
-  {
+{
     id: 'trend_up',
     regime: 'TRENDING',
     priority: 80,
-    minMatchRatio: 0.6,
+    minMatchRatio: 1.0, // Требуем все условия
     conditions: [
       (f, price) => price > f.trendEma,
       (f) => f.emaFast > f.emaSlow,
-      // 🔥 БЫЛО 0.01 (1%), СТАЛО 0.005 (0.5%) — ловим начало движения
-      (f) => f.pChange30m > 0.005,       
+      (f) => f.trueImpulseATR > 0.5, // Импульс есть
       (f) => f.volZ > -0.3
     ],
     weights: {
-      momentum: 0.80,      // БЫЛО 0.70. Увеличиваем! В тренде главное — инерция.
-      orderflow: 0.20,
-      meanReversion: 0.00, // Отключаем полностью в тренде. Не надо ловить откаты, надо ехать.
+      momentum: 0.80,       // ТОЛЬКО по тренду
+      orderflow: 0.20,      // Подтверждение
+      
+      // ⛔ ГЛАВНОЕ: УБИВАЕМ КОНТР-ТРЕНД
+      // Даже если MeanReversion кричит "Шорти!", мы его не слышим.
+      meanReversion: 0.00,  
+      
       oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
@@ -35,18 +38,18 @@ export const RegimeScenarios: RegimeScenario[] = [
     id: 'trend_down',
     regime: 'TRENDING',
     priority: 80,
-    minMatchRatio: 0.6,
+    minMatchRatio: 1.0,
     conditions: [
       (f, price) => price < f.trendEma,
       (f) => f.emaFast < f.emaSlow,
-      // 🔥 БЫЛО -0.01, СТАЛО -0.005
-      (f) => f.pChange30m < -0.005,
+      // 🔥 PRO: ATR-порог для даунтренда
+      (f) => f.trueImpulseATR < -0.5,
       (f) => f.volZ > -0.3
     ],
     weights: {
-      momentum: 0.80,      // БЫЛО 0.70. Увеличиваем! В тренде главное — инерция.
+      momentum: 0.80,
       orderflow: 0.20,
-      meanReversion: 0.00, // Отключаем полностью в тренде. Не надо ловить откаты, надо ехать.
+      meanReversion: 0.00,
       oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },
@@ -56,13 +59,13 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 90,
     minMatchRatio: 0.5,
     conditions: [
-      // Чуть снизили порог волатильности для входа
-      (f) => Math.abs(f.volZ) > 1.5 || Math.abs(f.pChange30m) > 0.03, 
+      // 🔥 PRO: 1.5 ATR = волатильный режим
+      (f) => Math.abs(f.volZ) > 1.5 || Math.abs(f.trueImpulseATR) > 1.5,
       (f) => Math.abs(f.priceReturn) > 0.002,
     ],
     weights: {
       orderflow: 0.40,
-      momentum: 0.40, // Баланс
+      momentum: 0.40,
       meanReversion: 0.20,
       oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
@@ -73,14 +76,14 @@ export const RegimeScenarios: RegimeScenario[] = [
     priority: 100,
     minMatchRatio: 0.7,
     conditions: [
-      (f) => Math.abs(f.pChange30m) > 0.08,
+      // 🔥 PRO: 5 ATR = экстремальное движение (переход к mean reversion)
+      (f) => Math.abs(f.trueImpulseATR) > 5.0,
       (f) => Math.abs(f.volZ) > 3.0,
     ],
     weights: {
-      // В экстремумах только разворот!
-      meanReversion: 0.90, 
+      meanReversion: 0.90,
       orderflow: 0.10,
-      momentum: 0.00, // Не лезем в уходящий поезд
+      momentum: 0.00,
       oi: 0.0, liquidations: 0.0, levels: 0.0,
     },
   },

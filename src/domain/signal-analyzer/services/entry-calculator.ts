@@ -13,19 +13,19 @@ export interface EntryResult {
     tp: number[];
     tpPct: number[];
     horizonMin: number;
-    
+
     // === Данные для исполнения ===
     riskPct: number;          // % риска от депозита
     positionSizeUsd: number;  // Итоговый объем позиции в $
     quantity: number;         // Количество монет
-    
+
     expectedPnL: number;
     feesInfo: {
         entryFee: number;
         exitFeeSl: number;
         exitFeeTp: number;
     };
-    
+
     isValid: boolean;
     reason?: string;
 }
@@ -63,7 +63,7 @@ export class EntryCalculator {
             entryPrice -= (direction * offset);
             entryType = 'limit';
         }
-        
+
         // 2. STOP LOSS
         const lookback = this.config.technical.slStructuralBars || 2;
         const relevantBars = bars.slice(-lookback);
@@ -91,14 +91,15 @@ export class EntryCalculator {
         }
 
         // 3. TAKE PROFIT
+        // 🔥 PRO: Pump-Pullback теперь определяется через ATR (5 ATR = сильный импульс)
         const isPumpPullback = (
-            features?.pChange30m !== undefined &&
-            Math.abs(features.pChange30m) >= 0.08
+            features?.trueImpulseATR !== undefined &&
+            Math.abs(features.trueImpulseATR) >= 5.0
         );
-        const priceDistanceToSl = Math.abs(entryPrice - slPrice); 
-        
+        const priceDistanceToSl = Math.abs(entryPrice - slPrice);
+
         let tp: number[];
-        
+
         if (isPumpPullback) {
             tp = [
                 entryPrice + (direction * priceDistanceToSl * 1.5),
@@ -109,18 +110,23 @@ export class EntryCalculator {
             if (regime === 'TRENDING') tpRatios = [3.0, 6.0];
             tp = tpRatios.map(ratio => entryPrice + (direction * priceDistanceToSl * ratio));
         }
-        
+
         // 4. POSITION SIZING (Compounding Logic)
         // ======================================
-        
+
         // 🔥 Если баланс передан (бэктест/лайв) — используем его. 
         // Иначе — берем дефолт из конфига (для тестов "в вакууме").
         const portfolioBalance = providedBalance || this.config.position.defaultPortfolioSize;
 
         let riskPct = this.config.position.baseRiskPct;
-        riskPct *= confidence;
+
+        // ✅ ИСПРАВЛЕНИЕ РИСКА:
+        // Не даем риску падать ниже 30% от базового, иначе позиция будет смешной
+        // Если confidence высокий (1.0) -> риск 100%. Если низкий (0.2) -> риск 30%.
+        riskPct *= Math.max(0.3, confidence);
+
         if (regime === 'VOLATILE') riskPct *= 0.7;
-        
+
         const riskAmountUsd = portfolioBalance * (riskPct / 100);
         const stopLossPct = priceDistanceToSl / entryPrice;
 
@@ -131,9 +137,9 @@ export class EntryCalculator {
         const maxPos = this.config.position.maxPositionSizeUsd;
         const maxLev = portfolioBalance * this.config.position.leverage;
         positionSizeUsd = Math.min(positionSizeUsd, maxPos, maxLev);
-        
+
         const quantity = positionSizeUsd / entryPrice;
-        
+
         // 5. FEES & PROFITABILITY CHECK
         // =============================
         const entryFee = positionSizeUsd * this.config.fees.taker;
@@ -146,23 +152,23 @@ export class EntryCalculator {
         // GUARD: Если расстояние до тейка меньше 0.6%, скорее всего комиссия съест прибыль
         const expectedMovePct = Math.abs(tp[0] - entryPrice) / entryPrice;
         if (expectedMovePct < 0.006) { // Меньше 0.6% движения
-             return { ...this.emptyResult(), isValid: false, reason: `Target too close (<0.6%), fees will kill profit` };
+            return { ...this.emptyResult(), isValid: false, reason: `Target too close (<0.6%), fees will kill profit` };
         }
 
         // GUARD: Fees too high relative to profit
         if (entryFee + exitFeeTp > grossProfitTp1 * 0.4) {
-             return { ...this.emptyResult(), isValid: false, reason: `Fees too high relative to profit` };
+            return { ...this.emptyResult(), isValid: false, reason: `Fees too high relative to profit` };
         }
-        
-        // GUARD: Minimum Profit - $1 или 1% от депозита (выбираем большее)
-        const minProfitUsd = 1.0;
-        const minProfitPct = portfolioBalance * 0.01; // 1% от депозита
-        const minProfitRequired = Math.max(minProfitUsd, minProfitPct);
-        
+
+        // GUARD: Minimum Profit - требуем хотя бы 0.5R чистыми
+        // ✅ ИСПРАВЛЕНИЕ: Привязка к РИСКУ (R), а не к депозиту
+        // Если мы рискуем $10, мы должны заработать хотя бы $5 чистыми
+        const minProfitRequired = Math.max(1.0, riskAmountUsd * 0.5);
+
         if (netProfitTp1 < minProfitRequired) {
-             return { ...this.emptyResult(), isValid: false, reason: `Net profit too low (${netProfitTp1.toFixed(2)}$ < ${minProfitRequired.toFixed(2)}$)` };
+            return { ...this.emptyResult(), isValid: false, reason: `Net profit too low (${netProfitTp1.toFixed(2)}$ < ${minProfitRequired.toFixed(2)}$)` };
         }
-        
+
         // GUARD: Stop Loss width
         if (stopLossPct * 100 > 8.0) {
             return { ...this.emptyResult(), isValid: false, reason: 'StopLoss too wide (>8%)' };
@@ -175,18 +181,18 @@ export class EntryCalculator {
 
         return {
             entryType,
-            entryPrice, 
+            entryPrice,
             sl: slPrice,
             tp,
             tpPct,
             horizonMin,
-            riskPct, 
-            
+            riskPct,
+
             positionSizeUsd,
             quantity,
             expectedPnL: netProfitTp1,
             feesInfo: { entryFee, exitFeeSl, exitFeeTp },
-            
+
             isValid: true
         };
     }

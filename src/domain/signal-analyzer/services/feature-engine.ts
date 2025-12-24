@@ -13,7 +13,6 @@ import {
 } from '../utils/rolling-stats';
 
 const EPS = 1e-10;
-const TREND_EMA_PERIOD = 200;
 
 export class FeatureEngine {
     private readonly lookbacks: LookbackConfig;
@@ -42,7 +41,7 @@ export class FeatureEngine {
      */
     public hydrate(bars: (BarData | AggregatedBar)[]): void {
         this.reset();
-        
+
         if (bars.length < 2) return;
 
         // Гарантируем хронологический порядок
@@ -83,9 +82,13 @@ export class FeatureEngine {
         const dCVD = this.computeDelta(bars, 'cvd', this.lookbacks.dCVD);
         const dOI = this.computeDelta(bars, 'oi', this.lookbacks.dOI);
 
-        const oiMean = this.oiStats.mean();
-        const oiFlowRaw = safeDivide(dOI, Math.max(oiMean, EPS));
-        const oiFlow = clamp(oiFlowRaw, -2.0, 2.0); // стабилизация всплесков
+        // ✅ Стабилизированная метрика OI Flow:
+        // Отношение изменения OI к изменению CVD. 
+        // Показывает, насколько движение обеспечено деньгами.
+        const oiFlowRaw = safeDivide(dOI, Math.abs(dCVD) + EPS);
+
+        // Клампим жестче, чтобы не улетало в небеса
+        const oiFlow = clamp(oiFlowRaw, -2.0, 2.0);
 
         const priceReturn = safeDivide(current.c - current.o, current.o);
         const lastPriceGap = safeDivide((current.lastPrice || current.c) - prev.c, prev.c);
@@ -99,10 +102,14 @@ export class FeatureEngine {
         const emaSlow = calculateEMA(closes, this.technical.emaSlowPeriod);
 
         // --- Trend EMA (гибкий период из конфига) ---
-        const trendEma = calculateEMA(closes, TREND_EMA_PERIOD || 200);
+        const trendEma = calculateEMA(closes, this.technical.trendEmaPeriod);
 
         const pChange30m = this.computeTwentyMinChange(bars);
         const pChangeUpTo30m = this.computeFlexibleChangeUpTo(bars);
+
+        // 🔥 PRO: ATR-Normalized True Impulse
+        // Ищет максимальное движение от HH/LL за окно и делит на ATR
+        const trueImpulseATR = this.computeTrueImpulse(bars, 30, atr);
 
         const { isLiqSignal, liqBias, liqStrength } = this.analyzeLiquidations(current, current.oi || 1);
         const { isAbsorption, absorptionBias } = this.analyzeAbsorption(current, deltaZ, volZ);
@@ -111,19 +118,19 @@ export class FeatureEngine {
         let sumVol30 = 0;
         let sumDelta30 = 0;
         const lookback30 = Math.min(bars.length, 30);
-        
+
         for (let i = 0; i < lookback30; i++) {
             const b = bars[bars.length - 1 - i];
-            
+
             // 🔴 ОШИБКА БЫЛА ЗДЕСЬ: sumVol30 += b.v; 
             // Мы должны привести объем к долларам, так как дельта в долларах!
-            
+
             // 🟢 ИСПРАВЛЕНИЕ: Умножаем объем на цену закрытия
-            sumVol30 += (b.v * b.c); 
-            
+            sumVol30 += (b.v * b.c);
+
             sumDelta30 += b.delta;
         }
-        
+
         const cvdDominance30m = safeDivide(sumDelta30, Math.max(sumVol30, EPS));
 
         return {
@@ -148,6 +155,7 @@ export class FeatureEngine {
             pChange30m,
             pChangeUpTo30m,
             cvdDominance30m,
+            trueImpulseATR,
         };
     }
 
@@ -213,6 +221,73 @@ export class FeatureEngine {
         }
 
         return bestChange;
+    }
+
+    /**
+     * 🔥 PRO: Вычисляет "Истинный Импульс" (True Impulse) в единицах ATR.
+     * 
+     * Логика:
+     * - Для ПАМПА: сравниваем текущую цену с Lowest Low за окно
+     * - Для ДАМПА: сравниваем текущую цену с Highest High за окно
+     * - Возвращаем то движение, которое сильнее по модулю
+     * - Делим на ATR для нормализации
+     * 
+     * Результат:
+     * - +3.0 = цена выросла на 3 ATR от дна (сильный ПАМП)
+     * - -3.0 = цена упала на 3 ATR от хая (сильный ДАМП)
+     * 
+     * @param bars - массив баров
+     * @param minutes - окно поиска в минутах (default: 30)
+     * @param currentAtr - текущий ATR для нормализации
+     */
+    private computeTrueImpulse(
+        bars: (BarData | AggregatedBar)[],
+        minutes: number,
+        currentAtr: number
+    ): number {
+        if (bars.length < 2 || currentAtr <= 0) return 0;
+
+        const currentBar = bars[bars.length - 1];
+        const currentPrice = currentBar.c;
+        const targetTs = currentBar.ts - (minutes * 60 * 1000);
+
+        // 1. Собираем массив свечей за нужное окно (rolling window)
+        let lowestLow = Infinity;
+        let highestHigh = -Infinity;
+        let barCount = 0;
+
+        for (let i = bars.length - 1; i >= 0; i--) {
+            const bar = bars[i];
+            if (bar.ts < targetTs) break;
+
+            // Используем L/H свечи для точного определения экстремумов
+            if (bar.l < lowestLow) lowestLow = bar.l;
+            if (bar.h > highestHigh) highestHigh = bar.h;
+            barCount++;
+        }
+
+        if (barCount < 2 || lowestLow === Infinity || highestHigh === -Infinity) {
+            return 0;
+        }
+
+        // 2. Считаем Run-up (Рост от дна) и Drawdown (Падение с хая)
+        // Насколько мы выросли от самого дна этого отрезка?
+        const pumpMove = currentPrice - lowestLow;
+
+        // Насколько мы упали от самой вершины этого отрезка?
+        const dumpMove = currentPrice - highestHigh;
+
+        // 3. Выбираем доминирующее движение (что сильнее по модулю)
+        let dominantMove: number;
+        if (Math.abs(pumpMove) > Math.abs(dumpMove)) {
+            dominantMove = pumpMove;  // Положительное = ПАМП
+        } else {
+            dominantMove = dumpMove;  // Отрицательное = ДАМП
+        }
+
+        // 4. Нормализуем по ATR
+        // Если ATR = $10, а цена прошла $30, то Impulse = 3.0
+        return dominantMove / currentAtr;
     }
 
     private updateRollingStats(bar: BarData | AggregatedBar): void {
@@ -293,6 +368,7 @@ export class FeatureEngine {
             pChange30m: 0,
             pChangeUpTo30m: 0,
             cvdDominance30m: 0,
+            trueImpulseATR: 0,
         };
     }
 

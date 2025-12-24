@@ -53,11 +53,11 @@ export interface Features {
 
     // Technical
     atr: number;
-    emaFast: number;       
+    emaFast: number;
     emaSlow: number;
-    
+
     // 🔥 НОВОЕ ПОЛЕ: Глобальный тренд (EMA 200)
-    trendEma: number;      
+    trendEma: number;
 
     // Flags
     liquidationSignal: boolean;
@@ -65,10 +65,16 @@ export interface Features {
     liquidationBias?: number;
     absorptionBias?: number;
     oi?: number;
-    
+
     pChange30m: number; // новый параметр
     pChangeUpTo30m: number; // максимальное движение за любое окно до 30м
     cvdDominance30m: number;
+
+    // 🔥 PRO: ATR-Normalized True Impulse
+    // Это "Истинный Импульс" в единицах ATR.
+    // Если = 3.0, значит цена прошла 3 "нормы волатильности" (3 ATR).
+    // Работает для любого актива независимо от его волатильности.
+    trueImpulseATR: number;
 }
 
 export interface MultiTimeframeFeatures {

@@ -12,7 +12,8 @@
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write src/**/*.ts",
     "format:all": "prettier --write \"**/*.{ts,js,json,md}\" --ignore-path .gitignore",
-    "export-analization-results": "tsx scripts/export-analization-results.ts"
+    "export-analization-results": "tsx scripts/export-analization-results.ts",
+    "backtest": "tsx scripts/backtest.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.86.2",

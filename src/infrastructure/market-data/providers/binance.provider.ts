@@ -64,6 +64,8 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
   private priorityMap = new Map<string, SymbolPriority>();
 
   private connected = false;
+  // Потенциальная утечка при частых реконнектах: таймеры не удаляются при успешном переподключении.
+  // TODO: Отслеживать таймеры per-WebSocket и удалять при успешном создании нового соединения.
   private reconnectTimers = new Set<NodeJS.Timeout>();
   private readyPromise: Promise<void>;
   private isPollingOI = false;
@@ -214,12 +216,15 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
     ws.on('error', () => this.errorCount++);
     ws.on('close', () => {
       if (closedByUs) return;
-      const timer = setTimeout(() => {
-        if (!this.connected) return;
-        this.wsList[this.wsList.indexOf(ws)] = this.createBatchWS(batch);
-        this.reconnectAttempts++;
-      }, 3000);
-      this.reconnectTimers.add(timer);
+      const idx = this.wsList.indexOf(ws);
+      if (idx !== -1) {
+        const timer = setTimeout(() => {
+          if (!this.connected) return;
+          this.wsList[idx] = this.createBatchWS(batch);
+          this.reconnectAttempts++;
+        }, 3000);
+        this.reconnectTimers.add(timer);
+      }
     });
     // @ts-ignore
     ws._closeGracefully = () => { closedByUs = true; try { ws.terminate(); } catch { } };
@@ -241,7 +246,10 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       if (msg.stream.includes('kline')) this.processKline(msg.data);
       else if (msg.stream.includes('markPrice')) this.processMarkPrice(msg.data);
       else if (msg.stream.includes('forceOrder')) this.processLiquidation(msg.data);
-    } catch (e) { this.errorCount++; }
+    } catch (e) {
+      this.logger.warn(`Failed to parse message: ${e instanceof Error ? e.message : String(e)}`);
+      this.errorCount++;
+    }
   }
 
   // --- PROCESSING ---
@@ -337,7 +345,11 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
       ohlc: payload.ohlc,
       indicators: payload.indicators
     };
-    try { if (this.callback) this.callback(update); } catch { }
+    try {
+      if (this.callback) this.callback(update);
+    } catch (e) {
+      this.logger.error(`Callback error for ${state.symbol}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // --- OI POLLING & PRIORITY ---
@@ -349,7 +361,7 @@ export class BinanceMarketDataProvider implements IMarketDataProvider {
         if (!Array.isArray(arr)) return;
         for (const t of arr) {
           const sym = t.s;
-          if (!this.symbols.has(sym) || LOW_PRIORITY_SYMBOLS.has(sym)) continue;
+          if (!this.symbols.has(sym)) continue;
           const change = Math.abs(parseFloat(t.P));
           const vol = parseFloat(t.q);
           const p = this.priorityMap.get(sym);
